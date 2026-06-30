@@ -222,25 +222,29 @@ void loop() {
       Serial.println("[SENSOR] Alerta: Puerta física abierta.");
     }
     
-    // Evaluación de la anomalía por tiempo límite (Ej: 10 segundos para pruebas rápidas)
+    // Evaluación de la anomalía por tiempo límite (Ej: 10 segundos)
     if (millis() - timerPuertaAbierta > 10000) {
       if (!modoClase) {
-        // Estado de Alerta Crítica: Puerta abandonada abierta
         REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN)); // Encendido atómico LED Rojo
         
-        // Generador de tono asíncrono para el Buzzer Pasivo (Evita usar la función bloqueante delay())
-        if (millis() - timerBuzzer > 150) { // Alterna cada 150ms (Tono intermitente)
+        // Generador de alarma intermitente de alta frecuencia (Buzzer Pasivo)
+        if (millis() - timerBuzzer > 500) { // Alternar cada 500ms
           timerBuzzer = millis();
           estadoBuzzer = !estadoBuzzer;
-          digitalWrite(BUZZER_PIN, estadoBuzzer); 
+          
+          if (estadoBuzzer) {
+            tone(BUZZER_PIN, 2000); // Inicia onda cuadrada a 2000 Hz (Tono agudo)
+          } else {
+            noTone(BUZZER_PIN);     // Silencia el canal de hardware
+          }
         }
       }
     }
   } else {
-    // Si la puerta se cierra, restauramos las variables de control y apagamos alertas
+    // Si la puerta se cierra, restauramos el sistema
     if (puertaEstabaAbierta) {
       puertaEstabaAbierta = false;
-      digitalWrite(BUZZER_PIN, LOW);
+      noTone(BUZZER_PIN); // Apagado seguro del oscilador
       REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN)); // Apagado atómico LED Rojo
       Serial.println("[SENSOR] Puerta física cerrada. Estado Seguro.");
     }
