@@ -148,13 +148,13 @@ void registrarAuditoria(String uid, String evento, String modo) {
     http.POST(payloadJSON);
     http.end();
   } else {
-    Serial.println("[LOG OFFLINE] Encolando en NVS...");
-    // Reemplazo directo de tu antigua función guardarLogOffline(uid)
+    // [CORRECCIÓN] Guardado en cola sin alterar el handle global
     int totalLogs = prefs.getInt("total_logs", 0);
     totalLogs++;
     String claveLog = "log_" + String(totalLogs);
     prefs.putString(claveLog.c_str(), payloadJSON);
     prefs.putInt("total_logs", totalLogs);
+    Serial.printf("[LOG OFFLINE] Encolado en NVS (Posición %d)\n", totalLogs);
   }
 }
 
@@ -162,7 +162,6 @@ void sincronizarCredencialesDesdeFirebase() {
   if (WiFi.status() != WL_CONNECTED) return;
   
   Serial.println("[NVS-SYNC] Descargando credenciales...");
-  mostrarInterfazOLED("SINCRONIZANDO", "Descargando", "Credenciales");
 
   HTTPClient http;
   http.begin(FIREBASE_URL_USUARIOS);
@@ -171,8 +170,13 @@ void sincronizarCredencialesDesdeFirebase() {
   if (httpCode == 200) {
     String payload = http.getString();
     DynamicJsonDocument doc(4096); 
-    if (!deserializeJson(doc, payload)) {
+    
+    // [CORRECCIÓN] Evaluación estricta de la deserialización
+    DeserializationError error = deserializeJson(doc, payload);
+    
+    if (!error) {
       JsonObject usuarios = doc.as<JsonObject>();
+      int agregados = 0;
       
       for (JsonPair kv : usuarios) {
         JsonObject datosUsuario = kv.value().as<JsonObject>();
@@ -182,11 +186,14 @@ void sincronizarCredencialesDesdeFirebase() {
 
         if (habilitado) {
           prefs.putString(uidTarjeta.c_str(), hashPin);
+          agregados++;
         } else {
           prefs.remove(uidTarjeta.c_str());
         }
       }
-      Serial.println("[NVS-SYNC] Caché NVS actualizada.");
+      Serial.printf("[NVS-SYNC] Caché NVS actualizada. %d usuarios habilitados.\n", agregados);
+    } else {
+      Serial.println("[ERR] Fallo parseo JSON de usuarios.");
     }
   }
   http.end();
@@ -228,7 +235,7 @@ void setup() {
     Serial.println("[ERR] Error crítico: Fallo montaje NVS");
     while (true) { delay(1000); }
   }
-  
+
   // Handshake WiFi asíncrono (evita watchdog reset)
   conectarWiFiReal();
 
@@ -581,66 +588,73 @@ void guardarLogOffline(String uid) {
 void sincronizarLogsOffline() {
   if (WiFi.status() != WL_CONNECTED) return;
 
-  prefs.begin("cache_2fa", false);
   int totalLogs = prefs.getInt("total_logs", 0);
+  if (totalLogs == 0) return;
 
-  if (totalLogs == 0) {
-    prefs.end();
-    return;
-  }
-
-  Serial.printf("[NVS-LOGS] Detectados %d logs en cola offline. Iniciando volcado...\n", totalLogs);
+  Serial.printf("[NVS-LOGS] Iniciando volcado de %d logs offline...\n", totalLogs);
   mostrarInterfazOLED("CONEXION OK", "Sincronizando", "Logs Offline...");
 
   HTTPClient http;
-  int logsExitosos = 0;
+  int logsProcesados = 0; // Cuenta subidos con éxito o purgados por corrupción
 
   for (int i = 1; i <= totalLogs; i++) {
     String claveLog = "log_" + String(i);
     String jsonStringNVS = prefs.getString(claveLog.c_str(), "");
 
     if (jsonStringNVS != "") {
-      // [CORRECCIÓN] Parsear el string de NVS a un objeto JSON limpio
       DynamicJsonDocument tempDoc(384);
       DeserializationError error = deserializeJson(tempDoc, jsonStringNVS);
 
       if (!error) {
         String payloadLimpio;
-        serializeJson(tempDoc, payloadLimpio); // Serialización limpia y estricta
+        serializeJson(tempDoc, payloadLimpio);
 
         http.begin(FIREBASE_URL_AUDITORIA);
         http.addHeader("Content-Type", "application/json");
-        
         int httpCode = http.POST(payloadLimpio);
+        http.end();
         
         if (httpCode == 200 || httpCode == 201) {
           prefs.remove(claveLog.c_str());
-          logsExitosos++;
+          logsProcesados++;
         } else {
-          Serial.printf("[NVS-LOGS] Error al subir %s. Código HTTP: %d. Abortando.\n", claveLog.c_str(), httpCode);
-          http.end();
-          break; 
+          Serial.printf("[NVS-LOGS] Error HTTP %d al subir %s. Pausando volcado.\n", httpCode, claveLog.c_str());
+          break; // Caída de red, salir del bucle
         }
-        http.end();
       } else {
-        Serial.printf("[NVS-LOGS] Log %s corrompido en NVS. Purgando.\n", claveLog.c_str());
-        prefs.remove(claveLog.c_str()); // Evita bloqueos por registros corruptos
+        Serial.printf("[NVS-LOGS] Log %s corrompido. Purgando.\n", claveLog.c_str());
+        prefs.remove(claveLog.c_str());
+        logsProcesados++; // Lo damos por procesado para que la cola avance
       }
+    } else {
+      logsProcesados++; // Si el log estaba vacío (ej. error previo de lectura), lo saltamos
     }
   }
 
-  if (logsExitosos == totalLogs) {
+  // [NUEVO] Algoritmo de Shifting para reordenar la cola FIFO si hubo volcado parcial
+  if (logsProcesados == totalLogs) {
     prefs.putInt("total_logs", 0);
-    Serial.println("[NVS-LOGS] Volcado completo. Cola NVS vaciada.");
-    mostrarInterfazOLED("SINC EXITOSA", "Logs subidos:", String(logsExitosos));
-  } else {
-    int restantes = totalLogs - logsExitosos;
-    prefs.putInt("total_logs", restantes);
-    Serial.printf("[NVS-LOGS] Volcado parcial. Quedan %d logs pendientes.\n", restantes);
+    Serial.println("[NVS-LOGS] Volcado 100% completado. Cola NVS vaciada.");
+    mostrarInterfazOLED("SINC EXITOSA", "Logs subidos:", String(logsProcesados));
+  } else if (logsProcesados > 0) {
+    int pendientes = totalLogs - logsProcesados;
+    Serial.printf("[NVS-LOGS] Desplazando cola. Moviendo %d logs pendientes al inicio...\n", pendientes);
+    
+    for (int i = 1; i <= pendientes; i++) {
+      String claveVieja = "log_" + String(i + logsProcesados);
+      String claveNueva = "log_" + String(i);
+      String dato = prefs.getString(claveVieja.c_str(), "");
+      
+      if (dato != "") {
+        prefs.putString(claveNueva.c_str(), dato);
+        prefs.remove(claveVieja.c_str());
+      }
+    }
+    prefs.putInt("total_logs", pendientes);
+    Serial.printf("[NVS-LOGS] Cola reajustada. Quedan %d logs.\n", pendientes);
   }
 
-  prefs.end();
-  delay(1500);
+  delay(1500); 
 }
 
 bool validarCredencialNube(String uid, String pin) {
