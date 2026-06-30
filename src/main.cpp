@@ -110,6 +110,7 @@ bool validarCredencialLocal(String uid, String pin);
 void guardarLogOffline(String uid);
 void mostrarInterfazOLED(String titulo, String mensaje, String submensaje);
 String generarHashSHA256(String texto);
+void sincronizarLogsOffline();
 
 void actualizarEstadoPuertaNube(String estado) {
   if (WiFi.status() == WL_CONNECTED) {
@@ -265,9 +266,9 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) {
       Serial.println("\n[NET] ¡Conexión restaurada con éxito!");
       redDisponible = true;
-      mostrarInterfazOLED("SISTEMA 2FA", "Modo Online", "Red Restaurada");
-      delay(1000);
-      mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
+      
+      // En lugar de ir directo a ESPERANDO_TARJETA, disparamos la sincronización
+      estadoActual = SINCRONIZANDO_LOGS; 
     }
   }
   // Polling de enlace de capa 2
@@ -479,7 +480,9 @@ void loop() {
       break;
       
     case SINCRONIZANDO_LOGS:
-      // TODO: Implementar rutina de volcado de cola NVS a Firebase tras recuperación de red
+      sincronizarLogsOffline();
+      mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
+      estadoActual = ESPERANDO_TARJETA;
       break;
   }
 }
@@ -573,6 +576,63 @@ void guardarLogOffline(String uid) {
   prefs.putString(claveLog.c_str(), datosLog);
   prefs.putInt("total_logs", totalLogs);
   Serial.printf("[MEM] Commit en sector Flash exitoso. Queue size: %d\n", totalLogs);
+}
+
+void sincronizarLogsOffline(){
+    if (WiFi.status() != WL_CONNECTED) return;
+
+    prefs.begin("cache_2fa", false);
+    int totalLogs = prefs.getInt("total_logs", 0);
+
+    if (totalLogs == 0) {
+      prefs.end();
+      return;
+    }
+
+    Serial.printf("[NVS-LOGS] Detectados %d logs en cola offline. Iniciando volcado...\n", totalLogs);
+    mostrarInterfazOLED("CONEXION OK", "Sincronizando", "Logs Offline...");
+
+    HTTPClient http;
+    int logsExitosos = 0;
+
+    // Recorremos la cola uno por uno
+    for (int i = 1; i <= totalLogs; i++) {
+      String claveLog = "log_" + String(i);
+      String payloadJSON = prefs.getString(claveLog.c_str(), "");
+
+      if (payloadJSON != "") {
+        http.begin(FIREBASE_URL_AUDITORIA);
+        http.addHeader("Content-Type", "application/json");
+        
+        int httpCode = http.POST(payloadJSON);
+        
+        if (httpCode == 200 || httpCode == 201) {
+          // Log subido con éxito, lo purgamos de la memoria NVS inmediatamente
+          prefs.remove(claveLog.c_str());
+          logsExitosos++;
+        } else {
+          Serial.printf("[NVS-LOGS] Error al subir %s. Código HTTP: %d. Abortando.\n", claveLog.c_str(), httpCode);
+          http.end();
+          break; // Detenemos el bucle para no perder los logs restantes si la red fluctúa
+        }
+        http.end();
+      }
+    }
+
+    // Reajustamos el contador de la cola basado en lo que realmente se subió
+    if (logsExitosos == totalLogs) {
+      prefs.putInt("total_logs", 0);
+      Serial.println("[NVS-LOGS] Volcado completo. Cola NVS vaciada.");
+      mostrarInterfazOLED("SINC EXITOSA", "Logs subidos:", String(logsExitosos));
+    } else {
+      // Si algunos fallaron, restamos los exitosos del total para la próxima reconexión
+      int restantes = totalLogs - logsExitosos;
+      prefs.putInt("total_logs", restantes);
+      Serial.printf("[NVS-LOGS] Volcado parcial. Quedan %d logs pendientes.\n", restantes);
+    }
+
+    prefs.end();
+    delay(1500); // UI visibility delay
 }
 
 bool validarCredencialNube(String uid, String pin) {
