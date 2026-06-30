@@ -578,61 +578,69 @@ void guardarLogOffline(String uid) {
   Serial.printf("[MEM] Commit en sector Flash exitoso. Queue size: %d\n", totalLogs);
 }
 
-void sincronizarLogsOffline(){
-    if (WiFi.status() != WL_CONNECTED) return;
+void sincronizarLogsOffline() {
+  if (WiFi.status() != WL_CONNECTED) return;
 
-    prefs.begin("cache_2fa", false);
-    int totalLogs = prefs.getInt("total_logs", 0);
+  prefs.begin("cache_2fa", false);
+  int totalLogs = prefs.getInt("total_logs", 0);
 
-    if (totalLogs == 0) {
-      prefs.end();
-      return;
-    }
+  if (totalLogs == 0) {
+    prefs.end();
+    return;
+  }
 
-    Serial.printf("[NVS-LOGS] Detectados %d logs en cola offline. Iniciando volcado...\n", totalLogs);
-    mostrarInterfazOLED("CONEXION OK", "Sincronizando", "Logs Offline...");
+  Serial.printf("[NVS-LOGS] Detectados %d logs en cola offline. Iniciando volcado...\n", totalLogs);
+  mostrarInterfazOLED("CONEXION OK", "Sincronizando", "Logs Offline...");
 
-    HTTPClient http;
-    int logsExitosos = 0;
+  HTTPClient http;
+  int logsExitosos = 0;
 
-    // Recorremos la cola uno por uno
-    for (int i = 1; i <= totalLogs; i++) {
-      String claveLog = "log_" + String(i);
-      String payloadJSON = prefs.getString(claveLog.c_str(), "");
+  for (int i = 1; i <= totalLogs; i++) {
+    String claveLog = "log_" + String(i);
+    String jsonStringNVS = prefs.getString(claveLog.c_str(), "");
 
-      if (payloadJSON != "") {
+    if (jsonStringNVS != "") {
+      // [CORRECCIÓN] Parsear el string de NVS a un objeto JSON limpio
+      DynamicJsonDocument tempDoc(384);
+      DeserializationError error = deserializeJson(tempDoc, jsonStringNVS);
+
+      if (!error) {
+        String payloadLimpio;
+        serializeJson(tempDoc, payloadLimpio); // Serialización limpia y estricta
+
         http.begin(FIREBASE_URL_AUDITORIA);
         http.addHeader("Content-Type", "application/json");
         
-        int httpCode = http.POST(payloadJSON);
+        int httpCode = http.POST(payloadLimpio);
         
         if (httpCode == 200 || httpCode == 201) {
-          // Log subido con éxito, lo purgamos de la memoria NVS inmediatamente
           prefs.remove(claveLog.c_str());
           logsExitosos++;
         } else {
           Serial.printf("[NVS-LOGS] Error al subir %s. Código HTTP: %d. Abortando.\n", claveLog.c_str(), httpCode);
           http.end();
-          break; // Detenemos el bucle para no perder los logs restantes si la red fluctúa
+          break; 
         }
         http.end();
+      } else {
+        Serial.printf("[NVS-LOGS] Log %s corrompido en NVS. Purgando.\n", claveLog.c_str());
+        prefs.remove(claveLog.c_str()); // Evita bloqueos por registros corruptos
       }
     }
+  }
 
-    // Reajustamos el contador de la cola basado en lo que realmente se subió
-    if (logsExitosos == totalLogs) {
-      prefs.putInt("total_logs", 0);
-      Serial.println("[NVS-LOGS] Volcado completo. Cola NVS vaciada.");
-      mostrarInterfazOLED("SINC EXITOSA", "Logs subidos:", String(logsExitosos));
-    } else {
-      // Si algunos fallaron, restamos los exitosos del total para la próxima reconexión
-      int restantes = totalLogs - logsExitosos;
-      prefs.putInt("total_logs", restantes);
-      Serial.printf("[NVS-LOGS] Volcado parcial. Quedan %d logs pendientes.\n", restantes);
-    }
+  if (logsExitosos == totalLogs) {
+    prefs.putInt("total_logs", 0);
+    Serial.println("[NVS-LOGS] Volcado completo. Cola NVS vaciada.");
+    mostrarInterfazOLED("SINC EXITOSA", "Logs subidos:", String(logsExitosos));
+  } else {
+    int restantes = totalLogs - logsExitosos;
+    prefs.putInt("total_logs", restantes);
+    Serial.printf("[NVS-LOGS] Volcado parcial. Quedan %d logs pendientes.\n", restantes);
+  }
 
-    prefs.end();
-    delay(1500); // UI visibility delay
+  prefs.end();
+  delay(1500);
 }
 
 bool validarCredencialNube(String uid, String pin) {
