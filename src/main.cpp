@@ -30,6 +30,9 @@
 #define LED_VERDE_PIN  4   // Control Relé (Apertura)
 #define LED_ROJO_PIN   2   // Alerta Visual (Denegación)
 #define WIFI_KILL_PIN  21  // Trigger hardware para testeo de latencia offline
+#define BOTON_SALIDA_PIN  34  // Bit 2 del registro GPIO_IN1_REG (34 - 32)
+#define SENSOR_PUERTA_PIN 35  // Bit 3 del registro GPIO_IN1_REG (35 - 32)
+#define BUZZER_PIN         15  // Pin asignado para las alertas sonoras
 
 // Bus SPI (MFRC522)
 #define RFID_RST_PIN   22  
@@ -80,10 +83,16 @@ unsigned long timerApertura = 0;
 unsigned long timerPinTimeout = 0;
 unsigned long timerReconexion = 0;
 const unsigned long INTERVALO_RECONEXION = 30000;
+unsigned long timerPuertaAbierta = 0;
+bool puertaEstabaAbierta = false;
+bool modoClase = false;
 String uidLeido = "";
 String pinIngresado = "";
 String asteriscosEnmascarados = "";
 
+// --- Variables de control para el buzzer pasivo 
+unsigned long timerBuzzer = 0;
+bool estadoBuzzer = false;
 
 // --- VARIABLES DE TELEMETRÍA ---
 unsigned long t_inicio_auth = 0;
@@ -124,7 +133,15 @@ void setup() {
   // Init SPI
   SPI.begin(); 
   rfid.PCD_Init();
+
+  // Los pines 34 y 35 no tienen pull-up interno, se configuran como INPUT estándar
+  pinMode(BOTON_SALIDA_PIN, INPUT);
+  pinMode(SENSOR_PUERTA_PIN, INPUT);
   
+  // Configuración del canal del Buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
   // Montar partición NVS
   if (!prefs.begin("cache_2fa", false)) {
     Serial.println("[ERR] Error crítico: Fallo montaje NVS");
@@ -177,9 +194,60 @@ void loop() {
     delay(1000);
   }
 
-  // --- NÚCLEO FSM ---
-  switch (estadoActual) {
+  // --LECTURA BARE-METAL (Pines superiores 32-39) ---
+  uint32_t gpio_in1_state = REG_READ(GPIO_IN1_REG);
+  
+  // Se evalúan los bits correspondientes aplicando máscaras booleanas
+  // Al ser pull-up externo, presionar el botón/separar el imán cambia el estado eléctrico
+  bool botonSalidaPresionado = !(gpio_in1_state & (1 << (BOTON_SALIDA_PIN - 32)));
+  bool puertaFisicamenteAbierta = (gpio_in1_state & (1 << (SENSOR_PUERTA_PIN - 32)));
+
+  // --INTERRUPCIÓN DE SOFTWARE - PETICIÓN DE SALIDA (REX) ---
+  // Si se presiona el botón interior y la Máquina de Estados está en reposo
+  if (botonSalidaPresionado && estadoActual == ESPERANDO_TARJETA) {
+    Serial.println("[REX] Petición de salida detectada. Liberando cerradura...");
     
+    // Conmutación bare-metal para activar el Relé (GPIO 4) instantáneamente
+    REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_VERDE_PIN)); 
+    
+    timerApertura = millis();
+    estadoActual = CERRADURA_ABIERTA; // Transición forzada de la FSM
+  }
+
+  // --MÓDULO DE MONITOREO DE LA PUERTA (auditoría preliminar) ---
+  if (puertaFisicamenteAbierta) {
+    if (!puertaEstabaAbierta) {
+      puertaEstabaAbierta = true;
+      timerPuertaAbierta = millis(); // Registramos el milisegundo exacto de apertura
+      Serial.println("[SENSOR] Alerta: Puerta física abierta.");
+    }
+    
+    // Evaluación de la anomalía por tiempo límite (Ej: 10 segundos para pruebas rápidas)
+    if (millis() - timerPuertaAbierta > 10000) {
+      if (!modoClase) {
+        // Estado de Alerta Crítica: Puerta abandonada abierta
+        REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN)); // Encendido atómico LED Rojo
+        
+        // Generador de tono asíncrono para el Buzzer Pasivo (Evita usar la función bloqueante delay())
+        if (millis() - timerBuzzer > 150) { // Alterna cada 150ms (Tono intermitente)
+          timerBuzzer = millis();
+          estadoBuzzer = !estadoBuzzer;
+          digitalWrite(BUZZER_PIN, estadoBuzzer); 
+        }
+      }
+    }
+  } else {
+    // Si la puerta se cierra, restauramos las variables de control y apagamos alertas
+    if (puertaEstabaAbierta) {
+      puertaEstabaAbierta = false;
+      digitalWrite(BUZZER_PIN, LOW);
+      REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN)); // Apagado atómico LED Rojo
+      Serial.println("[SENSOR] Puerta física cerrada. Estado Seguro.");
+    }
+  }
+
+  // --- NÚCLEO FSM ---
+  switch (estadoActual) {   
     case ESPERANDO_TARJETA:
       // Lectura no bloqueante del buffer SPI
       if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
@@ -299,10 +367,10 @@ void loop() {
 
     case CERRADURA_ABIERTA:
       // Temporización asíncrona para pulso electromecánico (5s)
-      if (millis() - timerApertura >= 5000) {
-        REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_VERDE_PIN));
-        mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
+      if (millis() - timerApertura > 5000) { // 5 segundos de apertura
+        REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_VERDE_PIN)); // Cierre del relé
         estadoActual = ESPERANDO_TARJETA;
+        Serial.println("[FSM] Cerradura asegurada.");
       }
       break;
 
