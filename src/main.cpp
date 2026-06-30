@@ -6,6 +6,7 @@
  */
 
 #include <Arduino.h>
+#include <time.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
@@ -103,13 +104,92 @@ int accesosExitososOffline = 0;
 static StaticJsonDocument<1024> docMemoria;
 
 // --- FORWARD DECLARATIONS ---
-void aprovisionarCredencialesMock();
 void conectarWiFiReal();
 bool validarCredencialNube(String uid, String pin);
 bool validarCredencialLocal(String uid, String pin);
 void guardarLogOffline(String uid);
 void mostrarInterfazOLED(String titulo, String mensaje, String submensaje);
 String generarHashSHA256(String texto);
+
+void actualizarEstadoPuertaNube(String estado) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(FIREBASE_URL_TELEMETRIA);
+    String payload = "{\"estado_puerta\": \"" + estado + "\"}";
+    http.PATCH(payload);
+    http.end();
+  }
+}
+
+void registrarAuditoria(String uid, String evento, String modo) {
+  struct tm timeinfo;
+  String horaExacta = "OFFLINE_TIME";
+  if (getLocalTime(&timeinfo)) {
+    char timeBuff[50];
+    strftime(timeBuff, sizeof(timeBuff), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    horaExacta = String(timeBuff);
+  }
+
+  DynamicJsonDocument logDoc(256);
+  logDoc["uid"] = uid;
+  logDoc["hora"] = horaExacta;
+  logDoc["evento"] = evento;
+  logDoc["modo"] = modo;
+  logDoc["id_terminal"] = ID_TERMINAL;
+
+  String payloadJSON;
+  serializeJson(logDoc, payloadJSON);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(FIREBASE_URL_AUDITORIA);
+    http.addHeader("Content-Type", "application/json");
+    http.POST(payloadJSON);
+    http.end();
+  } else {
+    Serial.println("[LOG OFFLINE] Encolando en NVS...");
+    // Reemplazo directo de tu antigua función guardarLogOffline(uid)
+    int totalLogs = prefs.getInt("total_logs", 0);
+    totalLogs++;
+    String claveLog = "log_" + String(totalLogs);
+    prefs.putString(claveLog.c_str(), payloadJSON);
+    prefs.putInt("total_logs", totalLogs);
+  }
+}
+
+void sincronizarCredencialesDesdeFirebase() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  
+  Serial.println("[NVS-SYNC] Descargando credenciales...");
+  mostrarInterfazOLED("SINCRONIZANDO", "Descargando", "Credenciales");
+
+  HTTPClient http;
+  http.begin(FIREBASE_URL_USUARIOS);
+  int httpCode = http.GET();
+
+  if (httpCode == 200) {
+    String payload = http.getString();
+    DynamicJsonDocument doc(4096); 
+    if (!deserializeJson(doc, payload)) {
+      JsonObject usuarios = doc.as<JsonObject>();
+      
+      for (JsonPair kv : usuarios) {
+        JsonObject datosUsuario = kv.value().as<JsonObject>();
+        String uidTarjeta = datosUsuario["uid"].as<String>();
+        String hashPin = datosUsuario["pin"].as<String>();
+        bool habilitado = datosUsuario["habilitado"].as<bool>();
+
+        if (habilitado) {
+          prefs.putString(uidTarjeta.c_str(), hashPin);
+        } else {
+          prefs.remove(uidTarjeta.c_str());
+        }
+      }
+      Serial.println("[NVS-SYNC] Caché NVS actualizada.");
+    }
+  }
+  http.end();
+}
 
 void setup() {
   Serial.begin(115200);
@@ -148,10 +228,14 @@ void setup() {
     while (true) { delay(1000); }
   }
   
-  aprovisionarCredencialesMock();
-  
   // Handshake WiFi asíncrono (evita watchdog reset)
   conectarWiFiReal();
+
+  // Sincronización NTP (UTC-5)
+  configTime(-5 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+  
+  // Sincronizar Caché de usuarios si hay red
+  sincronizarCredencialesDesdeFirebase();
   
   mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
 }
@@ -194,59 +278,55 @@ void loop() {
     delay(1000);
   }
 
-  // --LECTURA BARE-METAL (Pines superiores 32-39) ---
+// --LECTURA BARE-METAL (Pines superiores 32-39) ---
   uint32_t gpio_in1_state = REG_READ(GPIO_IN1_REG);
-  
-  // Se evalúan los bits correspondientes aplicando máscaras booleanas
-  // Al ser pull-up externo, presionar el botón/separar el imán cambia el estado eléctrico
   bool botonSalidaPresionado = !(gpio_in1_state & (1 << (BOTON_SALIDA_PIN - 32)));
   bool puertaFisicamenteAbierta = (gpio_in1_state & (1 << (SENSOR_PUERTA_PIN - 32)));
 
   // --INTERRUPCIÓN DE SOFTWARE - PETICIÓN DE SALIDA (REX) ---
-  // Si se presiona el botón interior y la Máquina de Estados está en reposo
   if (botonSalidaPresionado && estadoActual == ESPERANDO_TARJETA) {
     Serial.println("[REX] Petición de salida detectada. Liberando cerradura...");
-    
-    // Conmutación bare-metal para activar el Relé (GPIO 4) instantáneamente
     REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_VERDE_PIN)); 
     
+    registrarAuditoria("BOTON_INTERIOR", "ACCESO_CONCEDIDO", "REX_FISICO");
+    
     timerApertura = millis();
-    estadoActual = CERRADURA_ABIERTA; // Transición forzada de la FSM
+    estadoActual = CERRADURA_ABIERTA;
   }
 
-  // --MÓDULO DE MONITOREO DE LA PUERTA (auditoría preliminar) ---
+  // --MÓDULO DE MONITOREO DE LA PUERTA (Telemetría y Alerta Limitada) ---
   if (puertaFisicamenteAbierta) {
     if (!puertaEstabaAbierta) {
       puertaEstabaAbierta = true;
-      timerPuertaAbierta = millis(); // Registramos el milisegundo exacto de apertura
-      Serial.println("[SENSOR] Alerta: Puerta física abierta.");
+      timerPuertaAbierta = millis();
+      actualizarEstadoPuertaNube("ABIERTA");
+      Serial.println("[SENSOR] Puerta física abierta.");
     }
     
-    // Evaluación de la anomalía por tiempo límite (Ej: 10 segundos)
-    if (millis() - timerPuertaAbierta > 10000) {
-      if (!modoClase) {
-        REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN)); // Encendido atómico LED Rojo
-        
-        // Generador de alarma intermitente de alta frecuencia (Buzzer Pasivo)
-        if (millis() - timerBuzzer > 500) { // Alternar cada 500ms
+    unsigned long tiempoAbierta = millis() - timerPuertaAbierta;
+    
+    if (tiempoAbierta > 10000 && !modoClase) {
+      REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN)); // Visual siempre activo
+      
+      // Buzzer activo solo entre el seg 10 y 25 (15s de duración)
+      if (tiempoAbierta <= 25000) {
+        if (millis() - timerBuzzer > 500) {
           timerBuzzer = millis();
           estadoBuzzer = !estadoBuzzer;
-          
-          if (estadoBuzzer) {
-            tone(BUZZER_PIN, 2000); // Inicia onda cuadrada a 2000 Hz (Tono agudo)
-          } else {
-            noTone(BUZZER_PIN);     // Silencia el canal de hardware
-          }
+          if (estadoBuzzer) tone(BUZZER_PIN, 2000);
+          else noTone(BUZZER_PIN);
         }
+      } else {
+        noTone(BUZZER_PIN);
       }
     }
   } else {
-    // Si la puerta se cierra, restauramos el sistema
     if (puertaEstabaAbierta) {
       puertaEstabaAbierta = false;
-      noTone(BUZZER_PIN); // Apagado seguro del oscilador
-      REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN)); // Apagado atómico LED Rojo
-      Serial.println("[SENSOR] Puerta física cerrada. Estado Seguro.");
+      noTone(BUZZER_PIN);
+      REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN));
+      actualizarEstadoPuertaNube("CERRADA");
+      Serial.println("[SENSOR] Puerta física cerrada.");
     }
   }
 
@@ -322,12 +402,16 @@ void loop() {
     }
 
     case VALIDANDO_NUBE:
-      if (validarCredencialNube(uidLeido, pinIngresado)) {
-        estadoActual = ACCESO_CONCEDIDO;
-      } else {
-        estadoActual = ACCESO_DENEGADO;
-      }
-      break;
+    if (validarCredencialNube(uidLeido, pinIngresado)) {
+      // Logueamos el éxito directamente en Firebase
+      registrarAuditoria(uidLeido, "ACCESO_CONCEDIDO", "ONLINE_FIREBASE");
+      estadoActual = ACCESO_CONCEDIDO;
+    } else {
+      // Logueamos el intento fallido por seguridad
+      registrarAuditoria(uidLeido, "ACCESO_DENEGADO", "ONLINE_FIREBASE");
+      estadoActual = ACCESO_DENEGADO;
+    }
+    break;
 
     case VALIDANDO_LOCAL: {
     // [TELEMETRÍA] Registra el intento en modo contingencia
@@ -347,9 +431,9 @@ void loop() {
     }
     
     case GUARDANDO_LOG_OFFLINE: 
-      guardarLogOffline(uidLeido);
-      estadoActual = ACCESO_CONCEDIDO;
-      break;
+    registrarAuditoria(uidLeido, "ACCESO_CONCEDIDO", "OFFLINE_CACHE");
+    estadoActual = ACCESO_CONCEDIDO;
+    break;
 
     case ACCESO_CONCEDIDO:{
       // [TELEMETRÍA] Latencia bimodal
@@ -370,13 +454,14 @@ void loop() {
     }
 
     case CERRADURA_ABIERTA:
-      // Temporización asíncrona para pulso electromecánico (5s)
-      if (millis() - timerApertura > 5000) { // 5 segundos de apertura
-        REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_VERDE_PIN)); // Cierre del relé
-        estadoActual = ESPERANDO_TARJETA;
-        Serial.println("[FSM] Cerradura asegurada.");
-      }
-      break;
+    // Temporización asíncrona para pulso electromecánico (5s)
+    if (millis() - timerApertura > 5000) { 
+      REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_VERDE_PIN)); 
+      estadoActual = ESPERANDO_TARJETA;
+      Serial.println("[FSM] Cerradura asegurada.");
+      mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
+    }
+    break;
 
     case ACCESO_DENEGADO:
       Serial.println("[INFO] Autorización denegada.");
@@ -469,16 +554,6 @@ String generarHashSHA256(String texto) {
   return hashHex;
 }
 
-void aprovisionarCredencialesMock() {
-  // Setup de registro semilla en partición NVS
-  String hashGuardado = prefs.getString("EA401D35", ""); 
-  if (hashGuardado == "") {
-    // Inserta registro llave-valor. Llave: UID, Valor: Hash_SHA256(1234)
-    prefs.putString("EA401D35", "03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4");
-    prefs.putInt("total_logs", 0);
-  }
-}
-
 bool validarCredencialLocal(String uid, String pin) {
   String hashGuardado = prefs.getString(uid.c_str(), "");
   if (hashGuardado != "") {
@@ -504,8 +579,8 @@ bool validarCredencialNube(String uid, String pin) {
   if (WiFi.status() != WL_CONNECTED) return false;
   HTTPClient http;
   
-  // Endpoint protegido configurado en secrets.h
-  String url = String(FIREBASE_URL) + "?orderBy=\"uid\"&equalTo=\"" + uid + "\"";
+  // 1. Usamos la nueva macro de endpoints configurada en secrets.h
+  String url = String(FIREBASE_URL_USUARIOS) + "?orderBy=\"uid\"&equalTo=\"" + uid + "\"";
   
   http.begin(url);
   int httpCode = http.GET();
@@ -526,10 +601,13 @@ bool validarCredencialNube(String uid, String pin) {
         for (JsonPair kv : root) {
           JsonObject usuario = kv.value().as<JsonObject>();
           String pinHashDB = usuario["pin"].as<String>();
-          bool habilitado = usuario["habilitado"].as<bool>();
+          bool habilitado = usuario["habilitado"].as<bool>(); // Lectura booleana estricta
 
-          // Validación de factor dual con verificación de revocación remota
-          if (pinHashLocal == pinHashDB && habilitado == true) {
+          // (Futuro) Verificación del laboratorio específico según ID_TERMINAL
+          // bool permisoLaboratorio = usuario["permisos_laboratorios"][ID_TERMINAL].is<String>();
+
+          // Validación Zero-Trust
+          if (pinHashLocal == pinHashDB && habilitado) {
             accesoPermitido = true;
             break;
           }
@@ -540,7 +618,6 @@ bool validarCredencialNube(String uid, String pin) {
     Serial.printf("[ERR] Fallo handshake HTTPS. HTTP Code: %d\n", httpCode);
   }
   
-  // Liberación del socket subyacente (Prevención de Memory Leak)
   http.end(); 
   return accesoPermitido;
 }
