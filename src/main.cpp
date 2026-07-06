@@ -662,7 +662,7 @@ void iniciarModoAP() {
   WiFi.mode(WIFI_AP);
   delay(100);
   
-  WiFi.softAP("LabAccess_Config", "admin123"); 
+  WiFi.softAP("LabAccess_Config", "admin123",6, 0, 4); 
   
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSave);
