@@ -164,18 +164,29 @@ void registrarAuditoria(String uid, String evento, String modo) {
 
 void sincronizarCredencialesDesdeFirebase() {
   if (WiFi.status() != WL_CONNECTED) return;
-  
   Serial.println("[NVS-SYNC] Descargando credenciales...");
 
   HTTPClient http;
-  http.begin(FIREBASE_URL_USUARIOS);
-  http.setTimeout(2500);
-  int httpCode = http.GET();
+  http.setTimeout(4000); // Límite de 4 segundos por intento
+
+  int intentos = 0;
+  int httpCode = -1;
+  
+  // Bucle de reintento para superar la latencia de DNS del router
+  while (intentos < 3 && httpCode <= 0) {
+    http.begin(FIREBASE_URL_USUARIOS);
+    httpCode = http.GET();
+    
+    if (httpCode <= 0) {
+      Serial.printf("[NVS-SYNC] DNS/Timeout (HTTP %d). Reintentando en 2s...\n", httpCode);
+      delay(2000);
+    }
+    intentos++;
+  }
 
   if (httpCode == 200) {
     String payload = http.getString();
     DynamicJsonDocument doc(4096); 
-    
     DeserializationError error = deserializeJson(doc, payload);
     
     if (!error) {
@@ -196,9 +207,9 @@ void sincronizarCredencialesDesdeFirebase() {
         }
       }
       Serial.printf("[NVS-SYNC] Caché NVS actualizada. %d usuarios habilitados.\n", agregados);
-    } else {
-      Serial.println("[ERR] Fallo parseo JSON de usuarios.");
     }
+  } else {
+    Serial.printf("[ERR] Sincronización abortada. HTTP Final: %d\n", httpCode);
   }
   http.end();
 }
@@ -450,15 +461,23 @@ void loop() {
       break;
     }
 
-    case VALIDANDO_NUBE:
-      if (validarCredencialNube(uidLeido, pinIngresado)) {
+    case VALIDANDO_NUBE: {
+      int estadoAuth = validarCredencialNube(uidLeido, pinIngresado);
+      
+      if (estadoAuth == 1) {
         registrarAuditoria(uidLeido, "ACCESO_CONCEDIDO", "ONLINE_FIREBASE");
         estadoActual = ACCESO_CONCEDIDO;
-      } else {
+      } else if (estadoAuth == 0) {
         registrarAuditoria(uidLeido, "ACCESO_DENEGADO", "ONLINE_FIREBASE");
         estadoActual = ACCESO_DENEGADO;
+      } else {
+        // estadoAuth == -1 (Falso positivo de red: Hay Wi-Fi pero no internet)
+        Serial.println("[WARN] Servidor inalcanzable. Conmutando a caché NVS...");
+        redDisponible = false; // Forzamos bandera para evitar futuros cuelgues
+        estadoActual = VALIDANDO_LOCAL; // Redirige el flujo al modo Offline
       }
       break;
+    };
 
     case VALIDANDO_LOCAL: {
       intentosOffline++;
