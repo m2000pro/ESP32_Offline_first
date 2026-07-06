@@ -28,19 +28,16 @@
 #include "soc/gpio_reg.h"
 
 // --- HARDWARE ABSTRACTION LAYER (HAL) ---
-// Actuadores y Sensores Lógicos
-#define LED_VERDE_PIN  4   // Control Relé (Apertura)
-#define LED_ROJO_PIN   2   // Alerta Visual (Denegación)
-#define WIFI_KILL_PIN  21  // Trigger hardware para testeo de latencia offline
-#define BOTON_SALIDA_PIN  34  // Bit 2 del registro GPIO_IN1_REG (34 - 32)
-#define SENSOR_PUERTA_PIN 35  // Bit 3 del registro GPIO_IN1_REG (35 - 32)
-#define BUZZER_PIN         15  // Pin asignado para las alertas sonoras
+#define LED_VERDE_PIN  4   
+#define LED_ROJO_PIN   2   
+#define WIFI_KILL_PIN  21  
+#define BOTON_SALIDA_PIN  34  
+#define SENSOR_PUERTA_PIN 35  
+#define BUZZER_PIN         15  
 
-// Bus SPI (MFRC522)
 #define RFID_RST_PIN   22  
 #define RFID_SS_PIN    5   
 
-// Bus I2C (OLED SSD1306 0.96") - Remapeo para mitigar colisión de bus
 #define OLED_SDA       16
 #define OLED_SCL       17
 #define SCREEN_WIDTH   128 
@@ -98,8 +95,6 @@ String asteriscosEnmascarados = "";
 Preferences prefsWiFi;
 String bufferAdmin = "";
 
-
-// --- Variables de control para el buzzer pasivo 
 unsigned long timerBuzzer = 0;
 bool estadoBuzzer = false;
 
@@ -108,14 +103,12 @@ unsigned long t_inicio_auth = 0;
 int intentosOffline = 0;
 int accesosExitososOffline = 0;
 
-// Buffer estático para mitigar fragmentación del Heap durante deserialización
 static StaticJsonDocument<1024> docMemoria;
 
 // --- FORWARD DECLARATIONS ---
 void conectarWiFiReal();
 bool validarCredencialNube(String uid, String pin);
 bool validarCredencialLocal(String uid, String pin);
-void guardarLogOffline(String uid);
 void mostrarInterfazOLED(String titulo, String mensaje, String submensaje);
 String generarHashSHA256(String texto);
 void sincronizarLogsOffline();
@@ -159,7 +152,6 @@ void registrarAuditoria(String uid, String evento, String modo) {
     http.POST(payloadJSON);
     http.end();
   } else {
-    // [CORRECCIÓN] Guardado en cola sin alterar el handle global
     int totalLogs = prefs.getInt("total_logs", 0);
     totalLogs++;
     String claveLog = "log_" + String(totalLogs);
@@ -182,7 +174,6 @@ void sincronizarCredencialesDesdeFirebase() {
     String payload = http.getString();
     DynamicJsonDocument doc(4096); 
     
-    // [CORRECCIÓN] Evaluación estricta de la deserialización
     DeserializationError error = deserializeJson(doc, payload);
     
     if (!error) {
@@ -215,45 +206,36 @@ void setup() {
   
   pinMode(WIFI_KILL_PIN, INPUT_PULLUP);
   
-  // Setup Bare-Metal: Forzar estado bajo inicial para evitar activación parásita del relé
   REG_WRITE(GPIO_ENABLE_W1TS_REG, (1 << LED_VERDE_PIN) | (1 << LED_ROJO_PIN));
   REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_VERDE_PIN) | (1 << LED_ROJO_PIN)); 
   
-  // Init I2C
   Wire.begin(OLED_SDA, OLED_SCL);
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
     Serial.println(F("[ERR] Error crítico: Init SSD1306 I2C"));
-    while(true); // Bloqueo de seguridad si falla el HMI
+    while(true); 
   }
   
   display.clearDisplay();
   mostrarInterfazOLED("SISTEMA 2FA", "Booting...", "Sys Init");
 
-  // Init SPI
   SPI.begin(); 
   rfid.PCD_Init();
 
-  // Los pines 34 y 35 no tienen pull-up interno, se configuran como INPUT estándar
   pinMode(BOTON_SALIDA_PIN, INPUT);
   pinMode(SENSOR_PUERTA_PIN, INPUT);
   
-  // Configuración del canal del Buzzer
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 
-  // Montar partición NVS
   if (!prefs.begin("cache_2fa", false)) {
     Serial.println("[ERR] Error crítico: Fallo montaje NVS");
     while (true) { delay(1000); }
   }
 
-  // Handshake WiFi asíncrono (evita watchdog reset)
-  conectarWiFiReal();
+  // prefs.clear(); // Descomentar solo para limpieza inicial si la memoria NVS está corrupta
 
-  // Sincronización NTP (UTC-5)
+  conectarWiFiReal();
   configTime(-5 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-  
-  // Sincronizar Caché de usuarios si hay red
   sincronizarCredencialesDesdeFirebase();
   
   mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
@@ -261,43 +243,31 @@ void setup() {
 
 void loop() {
   // --- MONITORIZACIÓN Y RECONEXIÓN ASÍNCRONA ---
-  
-  // 1. Detección de Caída (Listener de Desconexión)
-  if (WiFi.status() != WL_CONNECTED && redDisponible) {
-    redDisponible = false;
-    Serial.println("\n[WARN] Caída de enlace WiFi. Transicionando a modo híbrido.");
-    mostrarInterfazOLED("ALERTA DE RED", "Modo Offline", "Conexion perdida");
-    delay(1000); // Pequeño debounce visual
-  }
-
-  // 2. Motor de Reconexión de Fondo (Listener de Recuperación)
-  if (!redDisponible) {
-    // Solo intentamos reconectar si han pasado 30 segundos desde el último intento
-    if (millis() - timerReconexion >= INTERVALO_RECONEXION) {
-      Serial.print("[NET] Intentando restaurar conexión en background... ");
-      WiFi.disconnect(); 
-      WiFi.begin(REAL_WIFI_SSID, REAL_WIFI_PASSWORD); // Llamada asíncrona nativa
-      timerReconexion = millis();
+  if (estadoActual != CONFIGURACION_WIFI && estadoActual != ESPERANDO_CLAVE_MAESTRA) {
+    if (WiFi.status() != WL_CONNECTED && redDisponible) {
+      redDisponible = false;
+      Serial.println("\n[WARN] Caída de enlace WiFi. Transicionando a modo híbrido.");
+      mostrarInterfazOLED("ALERTA DE RED", "Modo Offline", "Conexion perdida");
+      delay(1000); 
     }
-    
-    // Verificamos si la llamada asíncrona anterior tuvo éxito silenciosamente
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\n[NET] ¡Conexión restaurada con éxito!");
-      redDisponible = true;
+
+    if (!redDisponible) {
+      if (millis() - timerReconexion >= INTERVALO_RECONEXION) {
+        Serial.print("[NET] Intentando restaurar conexión en background... ");
+        WiFi.disconnect(); 
+        WiFi.begin(REAL_WIFI_SSID, REAL_WIFI_PASSWORD); 
+        timerReconexion = millis();
+      }
       
-      // En lugar de ir directo a ESPERANDO_TARJETA, disparamos la sincronización
-      estadoActual = SINCRONIZANDO_LOGS; 
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\n[NET] ¡Conexión restaurada con éxito!");
+        redDisponible = true;
+        estadoActual = SINCRONIZANDO_LOGS; 
+      }
     }
   }
-  // Polling de enlace de capa 2
-  if (WiFi.status() != WL_CONNECTED && redDisponible) {
-    redDisponible = false;
-    Serial.println("\n[WARN] Caída de enlace WiFi. Transicionando a modo híbrido.");
-    mostrarInterfazOLED("SISTEMA 2FA", "Modo Offline", "Listo");
-    delay(1000);
-  }
 
-// --LECTURA BARE-METAL (Pines superiores 32-39) ---
+  // --LECTURA BARE-METAL (Pines superiores 32-39) ---
   uint32_t gpio_in1_state = REG_READ(GPIO_IN1_REG);
   bool botonSalidaPresionado = !(gpio_in1_state & (1 << (BOTON_SALIDA_PIN - 32)));
   bool puertaFisicamenteAbierta = (gpio_in1_state & (1 << (SENSOR_PUERTA_PIN - 32)));
@@ -313,7 +283,7 @@ void loop() {
     estadoActual = CERRADURA_ABIERTA;
   }
 
-  // --MÓDULO DE MONITOREO DE LA PUERTA (Telemetría y Alerta Limitada) ---
+  // --MÓDULO DE MONITOREO DE LA PUERTA ---
   if (puertaFisicamenteAbierta) {
     if (!puertaEstabaAbierta) {
       puertaEstabaAbierta = true;
@@ -325,9 +295,8 @@ void loop() {
     unsigned long tiempoAbierta = millis() - timerPuertaAbierta;
     
     if (tiempoAbierta > 10000 && !modoClase) {
-      REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN)); // Visual siempre activo
+      REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN)); 
       
-      // Buzzer activo solo entre el seg 10 y 25 (15s de duración)
       if (tiempoAbierta <= 25000) {
         if (millis() - timerBuzzer > 500) {
           timerBuzzer = millis();
@@ -351,8 +320,7 @@ void loop() {
 
   // --- NÚCLEO FSM ---
   switch (estadoActual) {   
-    case ESPERANDO_TARJETA:
-      //Disparador del teclado matricial para configuración wifi
+    case ESPERANDO_TARJETA: {
       char teclaIdle = teclado.getKey();
       if (teclaIdle == '*') {
         Serial.println("[FSM] Iniciando autenticación administrativa...");
@@ -360,10 +328,9 @@ void loop() {
         timerAdmin = millis();
         mostrarInterfazOLED("MODO ADMIN", "Clave Maestra:", "_");
         estadoActual = ESPERANDO_CLAVE_MAESTRA;
-        break; // Rompe el switch para evitar leer tarjetas en este instante
+        break; 
       }
 
-      // Lectura no bloqueante del buffer SPI
       if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
         uidLeido = "";
         for (byte i = 0; i < rfid.uid.size; i++) {
@@ -371,7 +338,7 @@ void loop() {
           uidLeido += String(rfid.uid.uidByte[i], HEX);
         }
         uidLeido.toUpperCase();
-        rfid.PICC_HaltA(); // Comando HALT para evitar múltiples triggers del mismo tag
+        rfid.PICC_HaltA(); 
         
         Serial.println("\n[INFO] UID Capturado: " + uidLeido);
         
@@ -383,11 +350,11 @@ void loop() {
         estadoActual = ESPERANDO_PIN;
       }
       break;
-      
+    }
+    
     case ESPERANDO_CLAVE_MAESTRA: {
       char teclaAdmin = teclado.getKey();
       
-      // Timeout de seguridad: Regresa al modo normal si abandonan el teclado (10s)
       if (millis() - timerAdmin > 10000) {
         Serial.println("[ADMIN] Timeout de ingreso. Abortando.");
         mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
@@ -396,32 +363,29 @@ void loop() {
       }
 
       if (teclaAdmin) {
-        timerAdmin = millis(); // Refresca el TTL (Time To Live)
+        timerAdmin = millis(); 
         
         if (teclaAdmin == '#') { 
-          // Ejecuta la validación al presionar '#'
           if (bufferAdmin == CLAVE_MAESTRA_ADMIN) {
             Serial.println("[ADMIN] Autenticación exitosa. Levantando Portal Wi-Fi.");
             iniciarModoAP(); 
             estadoActual = CONFIGURACION_WIFI;
-            timerApertura = millis(); // Reciclamos el timer para medir el límite de 3 minutos del AP
+            timerApertura = millis(); 
           } else {
             Serial.println("[ADMIN] Clave incorrecta. Bloqueando acceso.");
             mostrarInterfazOLED("ERROR", "Clave Invalida", "Acceso Denegado");
             
             REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN));
-            delay(2000); // Penalización visual y bloqueo de fuerza bruta
+            delay(2000); 
             REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN));
             
             mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
             estadoActual = ESPERANDO_TARJETA;
           }
         } else if (teclaAdmin == '*') {
-          // Permite al usuario cancelar manualmente la operación
           mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
           estadoActual = ESPERANDO_TARJETA;
         } else {
-          // Concatena y enmascara la clave en pantalla
           if (bufferAdmin.length() < 8) {
             bufferAdmin += teclaAdmin;
             String mascara = "";
@@ -435,8 +399,6 @@ void loop() {
 
     case CONFIGURACION_WIFI:
       server.handleClient();
-      /*Si el administrador no guarda cambios en 3 minutos, 
-      el sistema se reinicia a su estado normal*/
       if (millis() - timerApertura > 180000) { 
         Serial.println("[AP] Timeout de configuración. Reiniciando...");
         ESP.restart();
@@ -446,7 +408,6 @@ void loop() {
     case ESPERANDO_PIN: {
       char tecla = teclado.getKey();
       
-      // TTL de 15s para ingreso manual
       if (millis() - timerPinTimeout > 15000) {
         Serial.println("[WARN] Timeout de entrada UART/Keypad.");
         estadoActual = ACCESO_DENEGADO;
@@ -454,21 +415,18 @@ void loop() {
       }
 
       if (tecla) {
-        timerPinTimeout = millis(); // Refresh TTL
+        timerPinTimeout = millis(); 
         
         if (tecla == '#') { 
-          // Commit manual del payload
           if (pinIngresado.length() > 0) {
             mostrarInterfazOLED("PROCESANDO", "Verificando...", "Identidad");
             estadoActual = redDisponible ? VALIDANDO_NUBE : VALIDANDO_LOCAL;
           }
         } else if (tecla == '*') { 
-          // Flush del buffer local
           pinIngresado = "";
           asteriscosEnmascarados = "";
           mostrarInterfazOLED("SEGUNDO FACTOR", "Ingrese PIN:", "_");
         } else {
-          // Filtrado de longitud máxima (4 bytes lógicos)
           if (pinIngresado.length() < 4) {
             pinIngresado += tecla;
             asteriscosEnmascarados += "*";
@@ -477,41 +435,31 @@ void loop() {
         }
       }
 
-      // Auto-commit al llenar el buffer
       if (pinIngresado.length() == 4) {
         mostrarInterfazOLED("PROCESANDO", "Verificando...", "Identidad");
-        delay(300); // UI delay para legibilidad
-        
-        // [TELEMETRÍA] Inicio de cronómetro de latencia
+        delay(300); 
         t_inicio_auth = millis();
-
         estadoActual = redDisponible ? VALIDANDO_NUBE : VALIDANDO_LOCAL;
       }
       break;
     }
 
     case VALIDANDO_NUBE:
-    if (validarCredencialNube(uidLeido, pinIngresado)) {
-      // Logueamos el éxito directamente en Firebase
-      registrarAuditoria(uidLeido, "ACCESO_CONCEDIDO", "ONLINE_FIREBASE");
-      estadoActual = ACCESO_CONCEDIDO;
-    } else {
-      // Logueamos el intento fallido por seguridad
-      registrarAuditoria(uidLeido, "ACCESO_DENEGADO", "ONLINE_FIREBASE");
-      estadoActual = ACCESO_DENEGADO;
-    }
-    break;
+      if (validarCredencialNube(uidLeido, pinIngresado)) {
+        registrarAuditoria(uidLeido, "ACCESO_CONCEDIDO", "ONLINE_FIREBASE");
+        estadoActual = ACCESO_CONCEDIDO;
+      } else {
+        registrarAuditoria(uidLeido, "ACCESO_DENEGADO", "ONLINE_FIREBASE");
+        estadoActual = ACCESO_DENEGADO;
+      }
+      break;
 
     case VALIDANDO_LOCAL: {
-    // [TELEMETRÍA] Registra el intento en modo contingencia
       intentosOffline++;
-      // Switchover lógico por indisponibilidad de servidor
       if (validarCredencialLocal(uidLeido, pinIngresado)) {
         accesosExitososOffline++;
-        // Cálculo de Tasa de Resiliencia en punto flotante
         float tasaFallo = ((float)accesosExitososOffline / intentosOffline) * 100.0;
         Serial.printf("[MÉTRICA] Tasa de Tolerancia a Fallos: %.2f%%\n", tasaFallo);
-
         estadoActual = GUARDANDO_LOG_OFFLINE;
       } else {
         estadoActual = ACCESO_DENEGADO;
@@ -520,12 +468,11 @@ void loop() {
     }
     
     case GUARDANDO_LOG_OFFLINE: 
-    registrarAuditoria(uidLeido, "ACCESO_CONCEDIDO", "OFFLINE_CACHE");
-    estadoActual = ACCESO_CONCEDIDO;
-    break;
+      registrarAuditoria(uidLeido, "ACCESO_CONCEDIDO", "OFFLINE_CACHE");
+      estadoActual = ACCESO_CONCEDIDO;
+      break;
 
     case ACCESO_CONCEDIDO:{
-      // [TELEMETRÍA] Latencia bimodal
       unsigned long latencia = millis() - t_inicio_auth;
       String modoAuth = redDisponible ? "ONLINE (Firebase)" : "OFFLINE (Flash NVS)";
       Serial.printf("[MÉTRICA] Latencia de Autenticación: %lu ms | Modo: %s\n", latencia, modoAuth.c_str());
@@ -533,7 +480,6 @@ void loop() {
       Serial.println("[INFO] 2FA OK. Modificando estado del actuador.");
       mostrarInterfazOLED("BIENVENIDO", "Acceso Concedido", "Cerradura Abierta");
       
-      // Conmutación GPIO en 1 ciclo de reloj (Evita latencia de digitalWrite)
       REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_VERDE_PIN));
       REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN));
       
@@ -543,14 +489,13 @@ void loop() {
     }
 
     case CERRADURA_ABIERTA:
-    // Temporización asíncrona para pulso electromecánico (5s)
-    if (millis() - timerApertura > 5000) { 
-      REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_VERDE_PIN)); 
-      estadoActual = ESPERANDO_TARJETA;
-      Serial.println("[FSM] Cerradura asegurada.");
-      mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
-    }
-    break;
+      if (millis() - timerApertura > 5000) { 
+        REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_VERDE_PIN)); 
+        estadoActual = ESPERANDO_TARJETA;
+        Serial.println("[FSM] Cerradura asegurada.");
+        mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
+      }
+      break;
 
     case ACCESO_DENEGADO:
       Serial.println("[INFO] Autorización denegada.");
@@ -559,7 +504,6 @@ void loop() {
       REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN));
       REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_VERDE_PIN));
       
-      // Delay bloqueante intencional para mitigar ataques de fuerza bruta locales
       delay(3000); 
       
       REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN)); 
@@ -583,7 +527,6 @@ void mostrarInterfazOLED(String titulo, String mensaje, String submensaje) {
   display.setTextSize(1);
   display.setCursor(0, 0);
   display.println(titulo);
-  // Uso de método optimizado GFX para rasterización horizontal
   display.drawFastHLine(0, 10, SCREEN_WIDTH, SSD1306_WHITE);
   
   display.setTextSize(1);
@@ -594,7 +537,7 @@ void mostrarInterfazOLED(String titulo, String mensaje, String submensaje) {
   display.setCursor(0, 44);
   display.println(submensaje);
   
-  display.display(); // Flush al buffer I2C
+  display.display(); 
 }
 
 // --- SUBSISTEMA DE RED ---
@@ -607,10 +550,23 @@ void conectarWiFiReal() {
   String targetSSID = (savedSSID != "") ? savedSSID : String(REAL_WIFI_SSID);
   String targetPass = (savedPass != "") ? savedPass : String(REAL_WIFI_PASSWORD);
 
+  WiFi.mode(WIFI_STA);       
+  WiFi.disconnect(true);     
+  delay(100);                
+
+  IPAddress local_IP;
+  IPAddress gateway;
+  IPAddress subnet;
+  IPAddress dns1(8, 8, 8, 8); 
+  IPAddress dns2(8, 8, 4, 4); 
+
+  if (!WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, dns1, dns2)) {
+    Serial.println("[NET] [ERR] Fallo al configurar DNS estáticos.");
+  }
+
   Serial.printf("[NET] Inicializando STA SSID: %s \n", targetSSID.c_str());
   WiFi.begin(targetSSID.c_str(), targetPass.c_str());
   
-  // Timeout forzado de 6s para no bloquear el boot sequence si no hay router
   int intentos = 0;
   while (WiFi.status() != WL_CONNECTED && intentos < 15) {
     delay(400);
@@ -627,7 +583,6 @@ void conectarWiFiReal() {
   }
 }
 
-//Interfaz HTML servida al celular/PC
 void handleRoot() {
   String html = "<html><body style='font-family:sans-serif; text-align:center; margin-top:50px;'>";
   html += "<h2>Configuracion Wi-Fi LabAccess</h2>";
@@ -639,13 +594,11 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
-//Recepción de datos y guardado atómico en NVS
 void handleSave() {
   if (server.hasArg("ssid")) {
     String newSSID = server.arg("ssid");
-    String newPass = server.arg("pass"); // Puede venir vacío si es red abierta
+    String newPass = server.arg("pass"); 
 
-    // Abrimos el namespace en modo lectura/escritura (false)
     prefsWiFi.begin("wifi_net", false);
     prefsWiFi.putString("ssid", newSSID);
     prefsWiFi.putString("pass", newPass);
@@ -654,29 +607,24 @@ void handleSave() {
     server.send(200, "text/html", "<h2>Guardado exitoso. El ESP32 se esta reiniciando...</h2>");
     delay(1000);
     
-    // Reinicio físico por hardware para aplicar cambios limpiamente
     ESP.restart(); 
   }
 }
 
-//Inicializador del Modo AP
 void iniciarModoAP() {
   WiFi.disconnect();
   WiFi.mode(WIFI_AP);
-  WiFi.softAP("LabAccess_Config", "admin123"); // Contraseña del AP (WPA2)
+  WiFi.softAP("LabAccess_Config", "admin123"); 
   
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSave);
-  server.begin(); // Initiate the server [cite: 73]
+  server.begin(); 
   
   Serial.println("[AP] Portal iniciado. Conéctate a 'LabAccess_Config'. IP: 192.168.4.1");
   mostrarInterfazOLED("MODO CONFIG", "Red: LabAccess_Config", "IP: 192.168.4.1");
 }
 
 // --- SUBSISTEMA CRIPTOGRÁFICO Y PERSISTENCIA (NVS) ---
-/**
- * @brief Genera digest SHA-256 utilizando aceleración hardware nativa
- */
 String generarHashSHA256(String texto) {
   byte shaResult[32];
   mbedtls_md_context_t ctx;
@@ -702,21 +650,9 @@ bool validarCredencialLocal(String uid, String pin) {
   String hashGuardado = prefs.getString(uid.c_str(), "");
   if (hashGuardado != "") {
     String pinHashLocal = generarHashSHA256(pin);
-    // Validación constante en tiempo. Evita vector de ataque por timing.
     if (pinHashLocal == hashGuardado) return true;
   }
   return false;
-}
-
-void guardarLogOffline(String uid) {
-  // Push atómico a cola de eventos en Flash
-  int totalLogs = prefs.getInt("total_logs", 0);
-  totalLogs++;
-  String claveLog = "log_" + String(totalLogs);
-  String datosLog = uid + "|Offline";
-  prefs.putString(claveLog.c_str(), datosLog);
-  prefs.putInt("total_logs", totalLogs);
-  Serial.printf("[MEM] Commit en sector Flash exitoso. Queue size: %d\n", totalLogs);
 }
 
 void sincronizarLogsOffline() {
@@ -729,7 +665,7 @@ void sincronizarLogsOffline() {
   mostrarInterfazOLED("CONEXION OK", "Sincronizando", "Logs Offline...");
 
   HTTPClient http;
-  int logsProcesados = 0; // Cuenta subidos con éxito o purgados por corrupción
+  int logsProcesados = 0; 
 
   for (int i = 1; i <= totalLogs; i++) {
     String claveLog = "log_" + String(i);
@@ -753,19 +689,18 @@ void sincronizarLogsOffline() {
           logsProcesados++;
         } else {
           Serial.printf("[NVS-LOGS] Error HTTP %d al subir %s. Pausando volcado.\n", httpCode, claveLog.c_str());
-          break; // Caída de red, salir del bucle
+          break; 
         }
       } else {
         Serial.printf("[NVS-LOGS] Log %s corrompido. Purgando.\n", claveLog.c_str());
         prefs.remove(claveLog.c_str());
-        logsProcesados++; // Lo damos por procesado para que la cola avance
+        logsProcesados++; 
       }
     } else {
-      logsProcesados++; // Si el log estaba vacío (ej. error previo de lectura), lo saltamos
+      logsProcesados++; 
     }
   }
 
-  // [NUEVO] Algoritmo de Shifting para reordenar la cola FIFO si hubo volcado parcial
   if (logsProcesados == totalLogs) {
     prefs.putInt("total_logs", 0);
     Serial.println("[NVS-LOGS] Volcado 100% completado. Cola NVS vaciada.");
@@ -795,7 +730,6 @@ bool validarCredencialNube(String uid, String pin) {
   if (WiFi.status() != WL_CONNECTED) return false;
   HTTPClient http;
   
-  // 1. Usamos la nueva macro de endpoints configurada en secrets.h
   String url = String(FIREBASE_URL_USUARIOS) + "?orderBy=\"uid\"&equalTo=\"" + uid + "\"";
   
   http.begin(url);
@@ -813,16 +747,11 @@ bool validarCredencialNube(String uid, String pin) {
         JsonObject root = docMemoria.as<JsonObject>();
         String pinHashLocal = generarHashSHA256(pin);
 
-        // Iteración sobre los nodos devueltos por el índice de Firebase
         for (JsonPair kv : root) {
           JsonObject usuario = kv.value().as<JsonObject>();
           String pinHashDB = usuario["pin"].as<String>();
-          bool habilitado = usuario["habilitado"].as<bool>(); // Lectura booleana estricta
+          bool habilitado = usuario["habilitado"].as<bool>(); 
 
-          // (Futuro) Verificación del laboratorio específico según ID_TERMINAL
-          // bool permisoLaboratorio = usuario["permisos_laboratorios"][ID_TERMINAL].is<String>();
-
-          // Validación Zero-Trust
           if (pinHashLocal == pinHashDB && habilitado) {
             accesoPermitido = true;
             break;
