@@ -18,6 +18,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <mbedtls/md.h> 
+#include <WebServer.h>
 
 // Configuración de red y endpoints excluidos del VCS (.gitignore)
 #include "secrets.h"
@@ -62,6 +63,7 @@ Keypad teclado = Keypad(makeKeymap(teclas), pinesFilas, pinesColumnas, FILAS, CO
 MFRC522 rfid(RFID_SS_PIN, RFID_RST_PIN);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 Preferences prefs;
+WebServer server(80);
 
 // --- DEFINICIÓN DE ESTADOS (FSM) ---
 enum EstadoSistema { 
@@ -73,7 +75,8 @@ enum EstadoSistema {
   ACCESO_DENEGADO,
   VALIDANDO_LOCAL,         
   GUARDANDO_LOG_OFFLINE,   
-  SINCRONIZANDO_LOGS       
+  SINCRONIZANDO_LOGS,
+  CONFIGURACION_WIFI       
 };
 
 EstadoSistema estadoActual = ESPERANDO_TARJETA;
@@ -90,6 +93,7 @@ bool modoClase = false;
 String uidLeido = "";
 String pinIngresado = "";
 String asteriscosEnmascarados = "";
+Preferences prefsWiFi;
 
 // --- Variables de control para el buzzer pasivo 
 unsigned long timerBuzzer = 0;
@@ -111,6 +115,9 @@ void guardarLogOffline(String uid);
 void mostrarInterfazOLED(String titulo, String mensaje, String submensaje);
 String generarHashSHA256(String texto);
 void sincronizarLogsOffline();
+void iniciarModoAP();
+void handleRoot();
+void handleSave();
 
 void actualizarEstadoPuertaNube(String estado) {
   if (WiFi.status() == WL_CONNECTED) {
@@ -341,6 +348,16 @@ void loop() {
   // --- NÚCLEO FSM ---
   switch (estadoActual) {   
     case ESPERANDO_TARJETA:
+      //Disparador del teclado matricial para configuración wifi
+      char teclaIdle = teclado.getKey();
+      if (teclaIdle == 'D') {
+        Serial.println("[FSM] Entrando a modo configuración Wi-Fi por comando manual.");
+        iniciarModoAP();
+        estadoActual = CONFIGURACION_WIFI;
+        timerApertura = millis(); // Usaremos este timer como timeout del AP
+        break;
+      }
+
       // Lectura no bloqueante del buffer SPI
       if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
         uidLeido = "";
@@ -359,6 +376,16 @@ void loop() {
         
         mostrarInterfazOLED("SEGUNDO FACTOR", "Ingrese PIN:", "_");
         estadoActual = ESPERANDO_PIN;
+      }
+      break;
+
+    case CONFIGURACION_WIFI:
+      server.handleClient();
+      /*Si el administrador no guarda cambios en 3 minutos, 
+      el sistema se reinicia a su estado normal*/
+      if (millis() - timerApertura > 180000) { 
+        Serial.println("[AP] Timeout de configuración. Reiniciando...");
+        ESP.restart();
       }
       break;
 
@@ -518,9 +545,16 @@ void mostrarInterfazOLED(String titulo, String mensaje, String submensaje) {
 
 // --- SUBSISTEMA DE RED ---
 void conectarWiFiReal() {
-  Serial.printf("[NET] Inicializando STA SSID: %s \n", REAL_WIFI_SSID);
-  
-  WiFi.begin(REAL_WIFI_SSID, REAL_WIFI_PASSWORD);
+  prefsWiFi.begin("wifi_net", true); 
+  String savedSSID = prefsWiFi.getString("ssid", "");
+  String savedPass = prefsWiFi.getString("pass", "");
+  prefsWiFi.end();
+
+  String targetSSID = (savedSSID != "") ? savedSSID : String(REAL_WIFI_SSID);
+  String targetPass = (savedPass != "") ? savedPass : String(REAL_WIFI_PASSWORD);
+
+  Serial.printf("[NET] Inicializando STA SSID: %s \n", targetSSID.c_str());
+  WiFi.begin(targetSSID.c_str(), targetPass.c_str());
   
   // Timeout forzado de 6s para no bloquear el boot sequence si no hay router
   int intentos = 0;
@@ -537,6 +571,52 @@ void conectarWiFiReal() {
     Serial.println("\n[NET] Link DOWN. Timeout. Iniciando fallback.");
     redDisponible = false;
   }
+}
+
+//Interfaz HTML servida al celular/PC
+void handleRoot() {
+  String html = "<html><body style='font-family:sans-serif; text-align:center; margin-top:50px;'>";
+  html += "<h2>Configuracion Wi-Fi LabAccess</h2>";
+  html += "<form action='/save' method='POST'>";
+  html += "<input type='text' name='ssid' placeholder='Nombre de la Red' required><br><br>";
+  html += "<input type='password' name='pass' placeholder='Contrasena'><br><br>";
+  html += "<input type='submit' value='Guardar y Reiniciar' style='background:#0BB885; color:white; padding:10px; border:none; border-radius:5px;'>";
+  html += "</form></body></html>";
+  server.send(200, "text/html", html);
+}
+
+//Recepción de datos y guardado atómico en NVS
+void handleSave() {
+  if (server.hasArg("ssid")) {
+    String newSSID = server.arg("ssid");
+    String newPass = server.arg("pass"); // Puede venir vacío si es red abierta
+
+    // Abrimos el namespace en modo lectura/escritura (false)
+    prefsWiFi.begin("wifi_net", false);
+    prefsWiFi.putString("ssid", newSSID);
+    prefsWiFi.putString("pass", newPass);
+    prefsWiFi.end();
+
+    server.send(200, "text/html", "<h2>Guardado exitoso. El ESP32 se esta reiniciando...</h2>");
+    delay(1000);
+    
+    // Reinicio físico por hardware para aplicar cambios limpiamente
+    ESP.restart(); 
+  }
+}
+
+//Inicializador del Modo AP
+void iniciarModoAP() {
+  WiFi.disconnect();
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("LabAccess_Config", "admin123"); // Contraseña del AP (WPA2)
+  
+  server.on("/", handleRoot);
+  server.on("/save", HTTP_POST, handleSave);
+  server.begin(); // Initiate the server [cite: 73]
+  
+  Serial.println("[AP] Portal iniciado. Conéctate a 'LabAccess_Config'. IP: 192.168.4.1");
+  mostrarInterfazOLED("MODO CONFIG", "Red: LabAccess_Config", "IP: 192.168.4.1");
 }
 
 // --- SUBSISTEMA CRIPTOGRÁFICO Y PERSISTENCIA (NVS) ---
