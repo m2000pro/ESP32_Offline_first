@@ -256,7 +256,11 @@ void setup() {
 
 void loop() {
   // --- MONITORIZACIÓN Y RECONEXIÓN ASÍNCRONA ---
-  if (estadoActual != CONFIGURACION_WIFI && estadoActual != ESPERANDO_CLAVE_MAESTRA) {
+  if (estadoActual != CONFIGURACION_WIFI && 
+      estadoActual != ESPERANDO_CLAVE_MAESTRA && 
+      estadoActual != ACCESO_CONCEDIDO && 
+      estadoActual != CERRADURA_ABIERTA) {
+    
     if (WiFi.status() != WL_CONNECTED && redDisponible) {
       redDisponible = false;
       Serial.println("\n[WARN] Caída de enlace WiFi. Transicionando a modo híbrido.");
