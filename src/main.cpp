@@ -148,6 +148,7 @@ void registrarAuditoria(String uid, String evento, String modo) {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
     http.begin(FIREBASE_URL_AUDITORIA);
+    http.setTimeout(2500);
     http.addHeader("Content-Type", "application/json");
     http.POST(payloadJSON);
     http.end();
@@ -168,6 +169,7 @@ void sincronizarCredencialesDesdeFirebase() {
 
   HTTPClient http;
   http.begin(FIREBASE_URL_USUARIOS);
+  http.setTimeout(2500);
   int httpCode = http.GET();
 
   if (httpCode == 200) {
@@ -420,6 +422,8 @@ void loop() {
         if (tecla == '#') { 
           if (pinIngresado.length() > 0) {
             mostrarInterfazOLED("PROCESANDO", "Verificando...", "Identidad");
+            // [AJUSTE] Verificación directa del estado físico del driver Wi-Fi antes de conmutar
+            redDisponible = (WiFi.status() == WL_CONNECTED);
             estadoActual = redDisponible ? VALIDANDO_NUBE : VALIDANDO_LOCAL;
           }
         } else if (tecla == '*') { 
@@ -437,8 +441,10 @@ void loop() {
 
       if (pinIngresado.length() == 4) {
         mostrarInterfazOLED("PROCESANDO", "Verificando...", "Identidad");
-        delay(300); 
+        delay(150); 
         t_inicio_auth = millis();
+        //Verificación directa del estado físico del driver Wi-Fi antes de conmutar
+        redDisponible = (WiFi.status() == WL_CONNECTED);
         estadoActual = redDisponible ? VALIDANDO_NUBE : VALIDANDO_LOCAL;
       }
       break;
@@ -733,6 +739,7 @@ bool validarCredencialNube(String uid, String pin) {
   String url = String(FIREBASE_URL_USUARIOS) + "?orderBy=\"uid\"&equalTo=\"" + uid + "\"";
   
   http.begin(url);
+  http.setTimeout(2500);
   int httpCode = http.GET();
   bool accesoPermitido = false;
 
