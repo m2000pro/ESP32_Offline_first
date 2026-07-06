@@ -654,15 +654,21 @@ void handleSave() {
 }
 
 void iniciarModoAP() {
-  WiFi.disconnect();
+  WiFi.disconnect(true, true);
+  delay(100);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+
   WiFi.mode(WIFI_AP);
+  delay(100);
+  
   WiFi.softAP("LabAccess_Config", "admin123"); 
   
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSave);
   server.begin(); 
   
-  Serial.println("[AP] Portal iniciado. Conéctate a 'LabAccess_Config'. IP: 192.168.4.1");
+  Serial.println("[AP] Portal iniciado limpiamente. Conéctate a 'LabAccess_Config'. IP: 192.168.4.1");
   mostrarInterfazOLED("MODO CONFIG", "Red: LabAccess_Config", "IP: 192.168.4.1");
 }
 
