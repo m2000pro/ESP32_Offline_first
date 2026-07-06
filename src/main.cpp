@@ -214,6 +214,14 @@ void sincronizarCredencialesDesdeFirebase() {
   http.end();
 }
 
+String obtenerClaveMaestra() {
+  prefsWiFi.begin("wifi_net", true); // Solo lectura
+  // Si no hay una clave guardada por el cliente, usa la de fábrica
+  String clave = prefsWiFi.getString("pin_admin", CLAVE_MAESTRA_ADMIN);
+  prefsWiFi.end();
+  return clave;
+}
+
 void setup() {
   Serial.begin(115200);
   
@@ -383,7 +391,7 @@ void loop() {
         timerAdmin = millis(); 
         
         if (teclaAdmin == '#') { 
-          if (bufferAdmin == CLAVE_MAESTRA_ADMIN) {
+          if (bufferAdmin == obtenerClaveMaestra()) {
             Serial.println("[ADMIN] Autenticación exitosa. Levantando Portal Wi-Fi.");
             iniciarModoAP(); 
             estadoActual = CONFIGURACION_WIFI;
@@ -603,12 +611,17 @@ void conectarWiFiReal() {
 }
 
 void handleRoot() {
-  String html = "<html><body style='font-family:sans-serif; text-align:center; margin-top:50px;'>";
-  html += "<h2>Configuracion Wi-Fi LabAccess</h2>";
-  html += "<form action='/save' method='POST'>";
-  html += "<input type='text' name='ssid' placeholder='Nombre de la Red' required><br><br>";
-  html += "<input type='password' name='pass' placeholder='Contrasena'><br><br>";
-  html += "<input type='submit' value='Guardar y Reiniciar' style='background:#0BB885; color:white; padding:10px; border:none; border-radius:5px;'>";
+  String html = "<html><body style='font-family:sans-serif; text-align:center; margin-top:30px; background-color:#0B1320; color:white;'>";
+  html += "<h2>Panel de Administracion LabAccess</h2>";
+  html += "<form action='/save' method='POST' style='background-color:#121B2A; padding:20px; border-radius:10px; display:inline-block;'>";
+  html += "<h3 style='color:#0BB885;'>1. Conexion Wi-Fi</h3>";
+  html += "<input type='text' name='ssid' placeholder='Nombre de la Red (SSID)' required style='padding:8px; width:200px;'><br><br>";
+  html += "<input type='password' name='pass' placeholder='Contrasena Wi-Fi' style='padding:8px; width:200px;'><br><br>";
+  
+  html += "<h3 style='color:#0BB885;'>2. Seguridad del Teclado</h3>";
+  html += "<input type='text' name='new_admin_pin' placeholder='Nueva Clave Maestra (Opcional)' style='padding:8px; width:200px;'><br><br>";
+  
+  html += "<input type='submit' value='Guardar y Reiniciar' style='background:#0BB885; color:#0B1320; padding:10px 20px; border:none; border-radius:5px; font-weight:bold; cursor:pointer;'>";
   html += "</form></body></html>";
   server.send(200, "text/html", html);
 }
@@ -617,15 +630,25 @@ void handleSave() {
   if (server.hasArg("ssid")) {
     String newSSID = server.arg("ssid");
     String newPass = server.arg("pass"); 
+    String newAdminPin = server.arg("new_admin_pin");
 
-    prefsWiFi.begin("wifi_net", false);
+    prefsWiFi.begin("wifi_net", false); // Modo escritura
     prefsWiFi.putString("ssid", newSSID);
     prefsWiFi.putString("pass", newPass);
+    
+    // Si el cliente rellenó el campo de nueva clave, se sobreescribe
+    if (newAdminPin != "") {
+      prefsWiFi.putString("pin_admin", newAdminPin);
+      Serial.println("[AP] Nueva Clave Maestra registrada en NVS.");
+    }
+    
     prefsWiFi.end();
 
-    server.send(200, "text/html", "<h2>Guardado exitoso. El ESP32 se esta reiniciando...</h2>");
-    delay(1000);
+    String htmlExito = "<html><body style='background-color:#0B1320; color:#0BB885; text-align:center; margin-top:50px;'>";
+    htmlExito += "<h2>Configuracion guardada exitosamente.</h2><p>El terminal se esta reiniciando...</p></body></html>";
+    server.send(200, "text/html", htmlExito);
     
+    delay(1500);
     ESP.restart(); 
   }
 }
