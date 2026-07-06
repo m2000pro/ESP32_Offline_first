@@ -76,6 +76,7 @@ enum EstadoSistema {
   VALIDANDO_LOCAL,         
   GUARDANDO_LOG_OFFLINE,   
   SINCRONIZANDO_LOGS,
+  ESPERANDO_CLAVE_MAESTRA,
   CONFIGURACION_WIFI       
 };
 
@@ -88,12 +89,15 @@ unsigned long timerPinTimeout = 0;
 unsigned long timerReconexion = 0;
 const unsigned long INTERVALO_RECONEXION = 30000;
 unsigned long timerPuertaAbierta = 0;
+unsigned long timerAdmin = 0;
 bool puertaEstabaAbierta = false;
 bool modoClase = false;
 String uidLeido = "";
 String pinIngresado = "";
 String asteriscosEnmascarados = "";
 Preferences prefsWiFi;
+String bufferAdmin = "";
+
 
 // --- Variables de control para el buzzer pasivo 
 unsigned long timerBuzzer = 0;
@@ -350,12 +354,13 @@ void loop() {
     case ESPERANDO_TARJETA:
       //Disparador del teclado matricial para configuración wifi
       char teclaIdle = teclado.getKey();
-      if (teclaIdle == 'D') {
-        Serial.println("[FSM] Entrando a modo configuración Wi-Fi por comando manual.");
-        iniciarModoAP();
-        estadoActual = CONFIGURACION_WIFI;
-        timerApertura = millis(); // Usaremos este timer como timeout del AP
-        break;
+      if (teclaIdle == '*') {
+        Serial.println("[FSM] Iniciando autenticación administrativa...");
+        bufferAdmin = "";
+        timerAdmin = millis();
+        mostrarInterfazOLED("MODO ADMIN", "Clave Maestra:", "_");
+        estadoActual = ESPERANDO_CLAVE_MAESTRA;
+        break; // Rompe el switch para evitar leer tarjetas en este instante
       }
 
       // Lectura no bloqueante del buffer SPI
@@ -378,6 +383,55 @@ void loop() {
         estadoActual = ESPERANDO_PIN;
       }
       break;
+      
+    case ESPERANDO_CLAVE_MAESTRA: {
+      char teclaAdmin = teclado.getKey();
+      
+      // Timeout de seguridad: Regresa al modo normal si abandonan el teclado (10s)
+      if (millis() - timerAdmin > 10000) {
+        Serial.println("[ADMIN] Timeout de ingreso. Abortando.");
+        mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
+        estadoActual = ESPERANDO_TARJETA;
+        break;
+      }
+
+      if (teclaAdmin) {
+        timerAdmin = millis(); // Refresca el TTL (Time To Live)
+        
+        if (teclaAdmin == '#') { 
+          // Ejecuta la validación al presionar '#'
+          if (bufferAdmin == CLAVE_MAESTRA_ADMIN) {
+            Serial.println("[ADMIN] Autenticación exitosa. Levantando Portal Wi-Fi.");
+            iniciarModoAP(); 
+            estadoActual = CONFIGURACION_WIFI;
+            timerApertura = millis(); // Reciclamos el timer para medir el límite de 3 minutos del AP
+          } else {
+            Serial.println("[ADMIN] Clave incorrecta. Bloqueando acceso.");
+            mostrarInterfazOLED("ERROR", "Clave Invalida", "Acceso Denegado");
+            
+            REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN));
+            delay(2000); // Penalización visual y bloqueo de fuerza bruta
+            REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN));
+            
+            mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
+            estadoActual = ESPERANDO_TARJETA;
+          }
+        } else if (teclaAdmin == '*') {
+          // Permite al usuario cancelar manualmente la operación
+          mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
+          estadoActual = ESPERANDO_TARJETA;
+        } else {
+          // Concatena y enmascara la clave en pantalla
+          if (bufferAdmin.length() < 8) {
+            bufferAdmin += teclaAdmin;
+            String mascara = "";
+            for(int i=0; i<bufferAdmin.length(); i++) mascara += "*";
+            mostrarInterfazOLED("MODO ADMIN", "Clave Maestra:", mascara);
+          }
+        }
+      }
+      break;
+    }
 
     case CONFIGURACION_WIFI:
       server.handleClient();
