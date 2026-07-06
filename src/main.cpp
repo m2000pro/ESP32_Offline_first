@@ -107,7 +107,7 @@ static StaticJsonDocument<1024> docMemoria;
 
 // --- FORWARD DECLARATIONS ---
 void conectarWiFiReal();
-bool validarCredencialNube(String uid, String pin);
+int validarCredencialNube(String uid, String pin);
 bool validarCredencialLocal(String uid, String pin);
 void mostrarInterfazOLED(String titulo, String mensaje, String submensaje);
 String generarHashSHA256(String texto);
@@ -579,16 +579,6 @@ void conectarWiFiReal() {
   WiFi.disconnect(true);     
   delay(100);                
 
-  IPAddress local_IP;
-  IPAddress gateway;
-  IPAddress subnet;
-  IPAddress dns1(8, 8, 8, 8); 
-  IPAddress dns2(8, 8, 4, 4); 
-
-  if (!WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, dns1, dns2)) {
-    Serial.println("[NET] [ERR] Fallo al configurar DNS estáticos.");
-  }
-
   Serial.printf("[NET] Inicializando STA SSID: %s \n", targetSSID.c_str());
   WiFi.begin(targetSSID.c_str(), targetPass.c_str());
   
@@ -751,16 +741,16 @@ void sincronizarLogsOffline() {
   delay(1500); 
 }
 
-bool validarCredencialNube(String uid, String pin) {
-  if (WiFi.status() != WL_CONNECTED) return false;
+int validarCredencialNube(String uid, String pin) {
+  if (WiFi.status() != WL_CONNECTED) return -1;
   HTTPClient http;
   
   String url = String(FIREBASE_URL_USUARIOS) + "?orderBy=\"uid\"&equalTo=\"" + uid + "\"";
   
   http.begin(url);
-  http.setTimeout(2500);
+  http.setTimeout(2500); // Evita bloqueos
   int httpCode = http.GET();
-  bool accesoPermitido = false;
+  int resultado = 0; // 0 = Denegado, 1 = Concedido, -1 = Fallo de red
 
   if (httpCode == HTTP_CODE_OK) {
     String payload = http.getString();
@@ -779,16 +769,17 @@ bool validarCredencialNube(String uid, String pin) {
           bool habilitado = usuario["habilitado"].as<bool>(); 
 
           if (pinHashLocal == pinHashDB && habilitado) {
-            accesoPermitido = true;
+            resultado = 1;
             break;
           }
         }
       }
     }
-  } else {
+  } else if (httpCode <= 0) {
     Serial.printf("[ERR] Fallo handshake HTTPS. HTTP Code: %d\n", httpCode);
+    resultado = -1; // Desvía hacia la memoria NVS
   }
   
   http.end(); 
-  return accesoPermitido;
+  return resultado;
 }
