@@ -119,19 +119,26 @@ void handleSave();
 //conversor hora a minutos
 int convertirHoraStrAMinutos(String horaStr) {
   horaStr.trim();
-  int spaceIdx = horaStr.indexOf(' ');
-  if (spaceIdx == -1) return 0;
+  String horaParte = horaStr;
+  String ampm = "";
 
-  String horaParte = horaStr.substring(0, spaceIdx);
-  String ampm = horaStr.substring(spaceIdx + 1);
-  ampm.toUpperCase();
+  int spaceIdx = horaStr.indexOf(' ');
+  if (spaceIdx != -1) {
+    horaParte = horaStr.substring(0, spaceIdx);
+    ampm = horaStr.substring(spaceIdx + 1);
+    ampm.toUpperCase();
+  }
 
   int colonIdx = horaParte.indexOf(':');
+  if (colonIdx == -1) return 0;
+
   int h = horaParte.substring(0, colonIdx).toInt();
   int m = horaParte.substring(colonIdx + 1).toInt();
 
+  // Parche predictivo de la APP de reservas
   if (ampm == "PM" && h != 12) h += 12;
-  if (ampm == "AM" && h == 12) h = 0;
+  else if (ampm == "AM" && h == 12) h = 0;
+  else if (ampm == "" && h < 7) h += 12; 
 
   return h * 60 + m;
 }
@@ -806,6 +813,63 @@ void sincronizarLogsOffline() {
   delay(1500); 
 }
 
+bool tieneReservaAprobada(String nombreEstudiante, struct tm timeinfo, int currentMin) {
+  HTTPClient http;
+  
+  // Codificamos el nombre para la URL (reemplaza espacios por %20)
+  String nombreEncoded = nombreEstudiante;
+  nombreEncoded.replace(" ", "%20");
+  
+  String url = String(FIREBASE_URL_RESERVAS) + "?orderBy=\"estudiante\"&equalTo=\"" + nombreEncoded + "\"";
+  
+  http.begin(url);
+  http.setTimeout(2500); // Timeout rápido para evitar trabar la puerta
+  int httpCode = http.GET();
+  bool reservaActiva = false;
+
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    
+    // Si Firebase devuelve algo diferente a nulo o vacío
+    if (payload != "null" && payload != "{}") {
+      DynamicJsonDocument docRes(4096);
+      DeserializationError err = deserializeJson(docRes, payload);
+      
+      if (!err) {
+        JsonObject reservas = docRes.as<JsonObject>();
+        // Formateamos la fecha al estilo de React (D/M/YYYY)
+        String fechaHoy = String(timeinfo.tm_mday) + "/" + String(timeinfo.tm_mon + 1) + "/" + String(timeinfo.tm_year + 1900);
+
+        for (JsonPair kv : reservas) {
+          JsonObject res = kv.value().as<JsonObject>();
+          String estado = res["estado"].as<String>();
+          String lab = res["laboratorio"].as<String>();
+          String fecha = res["fecha"].as<String>();
+
+          // Mapeo inverso: De texto visual al macro del hardware
+          bool labMatch = false;
+          if (String(ID_TERMINAL) == "LAB_COMPUTO" && lab.indexOf("Cómputo") >= 0) labMatch = true;
+          else if (String(ID_TERMINAL) == "LAB_ELECTRONICA" && lab.indexOf("Electrónica") >= 0) labMatch = true;
+          else if (String(ID_TERMINAL) == "LAB_QUIMICA" && lab.indexOf("Química") >= 0) labMatch = true;
+
+          // Triple validación: Aprobada + En este Lab + Para el día de hoy
+          if (estado == "aprobado" && labMatch && fecha == fechaHoy) {
+            int inicioRes = convertirHoraStrAMinutos(res["horaInicio"].as<String>());
+            int finRes = convertirHoraStrAMinutos(res["horaFin"].as<String>());
+            
+            if (currentMin >= inicioRes && currentMin <= finRes) {
+              reservaActiva = true;
+              break; 
+            }
+          }
+        }
+      }
+    }
+  }
+  http.end();
+  return reservaActiva;
+}
+
 int validarCredencialNube(String uid, String pin) {
   if (WiFi.status() != WL_CONNECTED) return -1;
   HTTPClient http;
@@ -872,7 +936,14 @@ int validarCredencialNube(String uid, String pin) {
             if (horarioValido) {
               resultado = 1; // Autorizado: Dentro de su horario y laboratorio
             } else {
-              resultado = 0; // Denegado: Fuera de horario o laboratorio incorrecto
+              String nombreUser = usuario["nombre"].as<String>();
+              
+              if (tieneReservaAprobada(nombreUser, timeinfo, currentMin)) {
+                 resultado = 1; // Concedido por reserva extraordinaria desde la App
+                 Serial.println("[ONLINE] Acceso concedido por RESERVA EXTRAORDINARIA");
+              } else {
+                 resultado = 0; // Denegado definitivamente (Ni clase regular, ni reserva)
+              }
             }
             break; // Detenemos el loop de usuarios, ya evaluamos a nuestro candidato
           }
