@@ -269,8 +269,11 @@ void setup() {
   
   pinMode(WIFI_KILL_PIN, INPUT_PULLUP);
   
-  REG_WRITE(GPIO_ENABLE_W1TS_REG, (1 << LED_VERDE_PIN) | (1 << LED_ROJO_PIN));
-  REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_VERDE_PIN) | (1 << LED_ROJO_PIN)); 
+  pinMode(LED_ROJO_PIN, OUTPUT);
+  digitalWrite(LED_ROJO_PIN, LOW);
+  pinMode(LED_VERDE_PIN, OUTPUT_OPEN_DRAIN); 
+  digitalWrite(LED_VERDE_PIN, HIGH);
+  //REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_VERDE_PIN) | (1 << LED_ROJO_PIN)); 
   
   Wire.begin(OLED_SDA, OLED_SCL);
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
@@ -345,7 +348,7 @@ void loop() {
   // --INTERRUPCIÓN DE SOFTWARE - PETICIÓN DE SALIDA (REX) ---
   if (botonSalidaPresionado && estadoActual == ESPERANDO_TARJETA) {
     Serial.println("[REX] Petición de salida detectada. Liberando cerradura...");
-    REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_VERDE_PIN)); 
+    digitalWrite(LED_VERDE_PIN, LOW); 
     
     registrarAuditoria("BOTON_INTERIOR", "ACCESO_CONCEDIDO", "REX_FISICO");
     
@@ -572,7 +575,7 @@ void loop() {
       Serial.println("[INFO] 2FA OK. Modificando estado del actuador.");
       mostrarInterfazOLED("BIENVENIDO", "Acceso Concedido", "Cerradura Abierta");
       
-      REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_VERDE_PIN));
+      digitalWrite(LED_VERDE_PIN, LOW);
       REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN));
       
       timerApertura = millis();
@@ -582,7 +585,7 @@ void loop() {
 
     case CERRADURA_ABIERTA:
       if (millis() - timerApertura > 5000) { 
-        REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_VERDE_PIN)); 
+        digitalWrite(LED_VERDE_PIN, HIGH);
         estadoActual = ESPERANDO_TARJETA;
         Serial.println("[FSM] Cerradura asegurada.");
         mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
@@ -594,7 +597,7 @@ void loop() {
       mostrarInterfazOLED("ERROR", "Acceso Denegado", "Clave/UID Invalido");
       
       REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN));
-      REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_VERDE_PIN));
+      digitalWrite(LED_VERDE_PIN, HIGH);
       
       delay(3000); 
       
