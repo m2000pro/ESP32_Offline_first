@@ -89,6 +89,7 @@ unsigned long timerPuertaAbierta = 0;
 unsigned long timerAdmin = 0;
 bool puertaEstabaAbierta = false;
 bool modoClase = false;
+bool alarmaPuertaEnviada = false;
 String uidLeido = "";
 String pinIngresado = "";
 String asteriscosEnmascarados = "";
@@ -365,6 +366,12 @@ void loop() {
     
     if (tiempoAbierta > 10000 && !modoClase) {
       REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN)); 
+
+      if (!alarmaPuertaEnviada) {
+         registrarAuditoria("SISTEMA", "PUERTA_ABANDONADA", "SENSOR_FISICO");
+         alarmaPuertaEnviada = true;
+         Serial.println("[ALERTA] Log de PUERTA_ABANDONADA enviado a Firebase");
+      }
       
       if (tiempoAbierta <= 25000) {
         if (millis() - timerBuzzer > 500) {
@@ -380,6 +387,7 @@ void loop() {
   } else {
     if (puertaEstabaAbierta) {
       puertaEstabaAbierta = false;
+      alarmaPuertaEnviada = false;
       noTone(BUZZER_PIN);
       REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN));
       actualizarEstadoPuertaNube("CERRADA");
@@ -443,7 +451,8 @@ void loop() {
           } else {
             Serial.println("[ADMIN] Clave incorrecta. Bloqueando acceso.");
             mostrarInterfazOLED("ERROR", "Clave Invalida", "Acceso Denegado");
-            
+            registrarAuditoria("SISTEMA", "ACCESO_DENEGADO", "FALLO_ADMIN");
+                        
             REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN));
             delay(2000); 
             REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN));
@@ -479,6 +488,7 @@ void loop() {
       
       if (millis() - timerPinTimeout > 15000) {
         Serial.println("[WARN] Timeout de entrada UART/Keypad.");
+        registrarAuditoria(uidLeido, "ACCESO_DENEGADO", "TIMEOUT_PIN");
         estadoActual = ACCESO_DENEGADO;
         break;
       }
@@ -543,6 +553,7 @@ void loop() {
         Serial.printf("[MÉTRICA] Tasa de Tolerancia a Fallos: %.2f%%\n", tasaFallo);
         estadoActual = GUARDANDO_LOG_OFFLINE;
       } else {
+        registrarAuditoria(uidLeido, "ACCESO_DENEGADO", "OFFLINE_CACHE");
         estadoActual = ACCESO_DENEGADO;
       }
       break;
