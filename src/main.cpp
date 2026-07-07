@@ -116,6 +116,26 @@ void iniciarModoAP();
 void handleRoot();
 void handleSave();
 
+//conversor hora a minutos
+int convertirHoraStrAMinutos(String horaStr) {
+  horaStr.trim();
+  int spaceIdx = horaStr.indexOf(' ');
+  if (spaceIdx == -1) return 0;
+
+  String horaParte = horaStr.substring(0, spaceIdx);
+  String ampm = horaStr.substring(spaceIdx + 1);
+  ampm.toUpperCase();
+
+  int colonIdx = horaParte.indexOf(':');
+  int h = horaParte.substring(0, colonIdx).toInt();
+  int m = horaParte.substring(colonIdx + 1).toInt();
+
+  if (ampm == "PM" && h != 12) h += 12;
+  if (ampm == "AM" && h == 12) h = 0;
+
+  return h * 60 + m;
+}
+
 void actualizarEstadoPuertaNube(String estado) {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
@@ -164,29 +184,24 @@ void registrarAuditoria(String uid, String evento, String modo) {
 
 void sincronizarCredencialesDesdeFirebase() {
   if (WiFi.status() != WL_CONNECTED) return;
-  Serial.println("[NVS-SYNC] Descargando credenciales...");
+  Serial.println("[NVS-SYNC] Descargando credenciales y mapeando laboratorios...");
 
   HTTPClient http;
-  http.setTimeout(4000); // Límite de 4 segundos por intento
+  http.setTimeout(4000); 
 
   int intentos = 0;
   int httpCode = -1;
   
-  // Bucle de reintento para superar la latencia de DNS del router
   while (intentos < 3 && httpCode <= 0) {
     http.begin(FIREBASE_URL_USUARIOS);
     httpCode = http.GET();
-    
-    if (httpCode <= 0) {
-      Serial.printf("[NVS-SYNC] DNS/Timeout (HTTP %d). Reintentando en 2s...\n", httpCode);
-      delay(2000);
-    }
+    if (httpCode <= 0) delay(2000);
     intentos++;
   }
 
   if (httpCode == 200) {
     String payload = http.getString();
-    DynamicJsonDocument doc(4096); 
+    DynamicJsonDocument doc(8192); // Aumentado ligeramente para soportar arrays de horarios
     DeserializationError error = deserializeJson(doc, payload);
     
     if (!error) {
@@ -198,21 +213,38 @@ void sincronizarCredencialesDesdeFirebase() {
         String uidTarjeta = datosUsuario["uid"].as<String>();
         String hashPin = datosUsuario["pin"].as<String>();
         bool habilitado = datosUsuario["habilitado"].as<bool>();
+        
+        bool perteneceAEsteLab = false;
+        JsonArray horarios = datosUsuario["horarios"].as<JsonArray>();
 
-        if (habilitado) {
+        // Inspeccionamos si al menos una franja horaria le corresponde a esta puerta
+        for (JsonObject h : horarios) {
+          String term = h["id_terminal"].as<String>();
+          // Fallback por si hay registros viejos sin id_terminal interno
+          if (term.length() == 0) term = datosUsuario["laboratorio"].as<String>().indexOf("Electrónica") > 0 ? "LAB_ELECTRONICA" : "LAB_COMPUTO";
+          
+          if (term == String(ID_TERMINAL)) {
+            perteneceAEsteLab = true;
+            break; // Si tiene permiso en al menos un horario, lo cacheamos para el modo Offline
+          }
+        }
+
+        if (habilitado && perteneceAEsteLab) {
           prefs.putString(uidTarjeta.c_str(), hashPin);
           agregados++;
         } else {
+          // Si está inhabilitado o sus horarios son exclusivamente de OTRO laboratorio, lo bloqueamos físicamente aquí
           prefs.remove(uidTarjeta.c_str());
         }
       }
-      Serial.printf("[NVS-SYNC] Caché NVS actualizada. %d usuarios habilitados.\n", agregados);
+      Serial.printf("[NVS-SYNC] Caché NVS actualizada. %d usuarios autorizados localmente.\n", agregados);
     }
   } else {
     Serial.printf("[ERR] Sincronización abortada. HTTP Final: %d\n", httpCode);
   }
   http.end();
 }
+
 
 String obtenerClaveMaestra() {
   prefsWiFi.begin("wifi_net", true); // Solo lectura
@@ -781,9 +813,9 @@ int validarCredencialNube(String uid, String pin) {
   String url = String(FIREBASE_URL_USUARIOS) + "?orderBy=\"uid\"&equalTo=\"" + uid + "\"";
   
   http.begin(url);
-  http.setTimeout(2500); // Evita bloqueos
+  http.setTimeout(2500); 
   int httpCode = http.GET();
-  int resultado = 0; // 0 = Denegado, 1 = Concedido, -1 = Fallo de red
+  int resultado = 0; 
 
   if (httpCode == HTTP_CODE_OK) {
     String payload = http.getString();
@@ -800,17 +832,56 @@ int validarCredencialNube(String uid, String pin) {
           JsonObject usuario = kv.value().as<JsonObject>();
           String pinHashDB = usuario["pin"].as<String>();
           bool habilitado = usuario["habilitado"].as<bool>(); 
+          JsonArray horarios = usuario["horarios"].as<JsonArray>();
 
+          // Primer cerrojo: Coincidencia de credenciales y estado global
           if (pinHashLocal == pinHashDB && habilitado) {
-            resultado = 1;
-            break;
+            
+            struct tm timeinfo;
+            if (!getLocalTime(&timeinfo)) {
+               // Si el reloj NTP falla temporalmente, verificamos si al menos pertenece al laboratorio
+               bool perteneceAlLab = false;
+               for (JsonObject h : horarios) {
+                 if (h["id_terminal"].as<String>() == String(ID_TERMINAL)) { perteneceAlLab = true; break; }
+               }
+               resultado = perteneceAlLab ? 1 : 0;
+               break; 
+            }
+
+            int currentMin = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+            const char* diasSemana[] = {"Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"};
+            String diaActualStr = diasSemana[timeinfo.tm_wday];
+
+            bool horarioValido = false;
+
+            // Recorremos los horarios para buscar un "Match" perfecto
+            for (JsonObject h : horarios) {
+              String term = h["id_terminal"].as<String>();
+              
+              if (term == String(ID_TERMINAL) && h["dia"].as<String>() == diaActualStr) {
+                int inicioMin = convertirHoraStrAMinutos(h["inicio"].as<String>());
+                int finMin = convertirHoraStrAMinutos(h["fin"].as<String>());
+                
+                if (currentMin >= inicioMin && currentMin <= finMin) {
+                  horarioValido = true;
+                  break; // Match perfecto encontrado
+                }
+              }
+            }
+
+            if (horarioValido) {
+              resultado = 1; // Autorizado: Dentro de su horario y laboratorio
+            } else {
+              resultado = 0; // Denegado: Fuera de horario o laboratorio incorrecto
+            }
+            break; // Detenemos el loop de usuarios, ya evaluamos a nuestro candidato
           }
         }
       }
     }
   } else if (httpCode <= 0) {
     Serial.printf("[ERR] Fallo handshake HTTPS. HTTP Code: %d\n", httpCode);
-    resultado = -1; // Desvía hacia la memoria NVS
+    resultado = -1; 
   }
   
   http.end(); 
