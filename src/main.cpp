@@ -269,11 +269,14 @@ void setup() {
   
   pinMode(WIFI_KILL_PIN, INPUT_PULLUP);
   
+  // --- CONFIGURACIÓN TRI-STATE DEL RELÉ ---
   pinMode(LED_ROJO_PIN, OUTPUT);
   digitalWrite(LED_ROJO_PIN, LOW);
-  pinMode(LED_VERDE_PIN, OUTPUT_OPEN_DRAIN); 
-  digitalWrite(LED_VERDE_PIN, HIGH);
-  //REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_VERDE_PIN) | (1 << LED_ROJO_PIN)); 
+  
+  // Al ponerlo como INPUT (Alta Impedancia), el relé 5V se apaga de forma limpia y silenciosa
+  pinMode(LED_VERDE_PIN, OUTPUT);
+  digitalWrite(LED_VERDE_PIN, HIGH); 
+  // ----------------------------------------
   
   Wire.begin(OLED_SDA, OLED_SCL);
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
@@ -348,6 +351,9 @@ void loop() {
   // --INTERRUPCIÓN DE SOFTWARE - PETICIÓN DE SALIDA (REX) ---
   if (botonSalidaPresionado && estadoActual == ESPERANDO_TARJETA) {
     Serial.println("[REX] Petición de salida detectada. Liberando cerradura...");
+    
+    // Lo volvemos OUTPUT y mandamos LOW para que el relé se active (haga clack)
+    pinMode(LED_VERDE_PIN, OUTPUT);
     digitalWrite(LED_VERDE_PIN, LOW); 
     
     registrarAuditoria("BOTON_INTERIOR", "ACCESO_CONCEDIDO", "REX_FISICO");
@@ -575,7 +581,8 @@ void loop() {
       Serial.println("[INFO] 2FA OK. Modificando estado del actuador.");
       mostrarInterfazOLED("BIENVENIDO", "Acceso Concedido", "Cerradura Abierta");
       
-      digitalWrite(LED_VERDE_PIN, LOW);
+      digitalWrite(LED_VERDE_PIN, LOW); // LOW = 0V = Relé Encendido (Abre puerta)
+      REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN));
       REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN));
       
       timerApertura = millis();
@@ -586,6 +593,7 @@ void loop() {
     case CERRADURA_ABIERTA:
       if (millis() - timerApertura > 5000) { 
         digitalWrite(LED_VERDE_PIN, HIGH);
+        
         estadoActual = ESPERANDO_TARJETA;
         Serial.println("[FSM] Cerradura asegurada.");
         mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
