@@ -452,7 +452,7 @@ void loop() {
             Serial.println("[ADMIN] Clave incorrecta. Bloqueando acceso.");
             mostrarInterfazOLED("ERROR", "Clave Invalida", "Acceso Denegado");
             registrarAuditoria("SISTEMA", "ACCESO_DENEGADO", "FALLO_ADMIN");
-                        
+
             REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN));
             delay(2000); 
             REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN));
@@ -625,8 +625,13 @@ void mostrarInterfazOLED(String titulo, String mensaje, String submensaje) {
   display.setCursor(0, 24);
   display.println(mensaje);
   
-  display.setTextSize(2);
-  display.setCursor(0, 44);
+  if (submensaje.length() <= 10) {
+    display.setTextSize(2);
+    display.setCursor(0, 42); 
+  } else {
+    display.setTextSize(1);
+    display.setCursor(0, 44); 
+  }
   display.println(submensaje);
   
   display.display(); 
