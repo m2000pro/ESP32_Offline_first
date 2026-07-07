@@ -94,6 +94,7 @@ String pinIngresado = "";
 String asteriscosEnmascarados = "";
 Preferences prefsWiFi;
 String bufferAdmin = "";
+String idTerminalGlobal = "LAB_COMPUTO"; 
 
 unsigned long timerBuzzer = 0;
 bool estadoBuzzer = false;
@@ -146,7 +147,8 @@ int convertirHoraStrAMinutos(String horaStr) {
 void actualizarEstadoPuertaNube(String estado) {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
-    http.begin(FIREBASE_URL_TELEMETRIA);
+    String urlTelemetria = "https://labacces-1b14d-default-rtdb.firebaseio.com/configuracion_laboratorios/" + idTerminalGlobal + ".json";
+    http.begin(urlTelemetria);
     String payload = "{\"estado_puerta\": \"" + estado + "\"}";
     http.PATCH(payload);
     http.end();
@@ -167,7 +169,7 @@ void registrarAuditoria(String uid, String evento, String modo) {
   logDoc["hora"] = horaExacta;
   logDoc["evento"] = evento;
   logDoc["modo"] = modo;
-  logDoc["id_terminal"] = ID_TERMINAL;
+  logDoc["id_terminal"] = idTerminalGlobal;
 
   String payloadJSON;
   serializeJson(logDoc, payloadJSON);
@@ -230,7 +232,7 @@ void sincronizarCredencialesDesdeFirebase() {
           // Fallback por si hay registros viejos sin id_terminal interno
           if (term.length() == 0) term = datosUsuario["laboratorio"].as<String>().indexOf("Electrónica") > 0 ? "LAB_ELECTRONICA" : "LAB_COMPUTO";
           
-          if (term == String(ID_TERMINAL)) {
+          if (term == idTerminalGlobal) {
             perteneceAEsteLab = true;
             break; // Si tiene permiso en al menos un horario, lo cacheamos para el modo Offline
           }
@@ -291,6 +293,9 @@ void setup() {
     Serial.println("[ERR] Error crítico: Fallo montaje NVS");
     while (true) { delay(1000); }
   }
+
+  idTerminalGlobal = prefs.getString("id_terminal", "LAB_COMPUTO");
+  Serial.println("[NVS] ID de Terminal configurado como: " + idTerminalGlobal);
 
   // prefs.clear(); // Descomentar solo para limpieza inicial si la memoria NVS está corrupta
 
@@ -660,7 +665,12 @@ void handleRoot() {
   html += "<h3 style='color:#0BB885;'>2. Seguridad del Teclado</h3>";
   html += "<input type='text' name='new_admin_pin' placeholder='Nueva Clave Maestra (Opcional)' style='padding:8px; width:200px;'><br><br>";
   
+  html += "<h3 style='color:#0BB885;'>3. Asignar Codigo de Laboratorio</h3>";
+  html += "<p style='color:#888; font-size:12px; margin-top:-10px; margin-bottom:10px;'>Nomenclatura oficial (Ej: LAB-01, FIS-204)</p>";
+  html += "<input type='text' name='id_terminal' value='" + idTerminalGlobal + "' placeholder='Ej: LAB-01' required style='padding:8px; width:200px; border-radius:5px; text-transform:uppercase;'><br><br>";
+  
   html += "<input type='submit' value='Guardar y Reiniciar' style='background:#0BB885; color:#0B1320; padding:10px 20px; border:none; border-radius:5px; font-weight:bold; cursor:pointer;'>";
+  
   html += "</form></body></html>";
   server.send(200, "text/html", html);
 }
@@ -679,6 +689,13 @@ void handleSave() {
     if (newAdminPin != "") {
       prefsWiFi.putString("pin_admin", newAdminPin);
       Serial.println("[AP] Nueva Clave Maestra registrada en NVS.");
+    }
+
+    if (server.hasArg("id_terminal")) {
+      String nuevoTerminal = server.arg("id_terminal");
+      prefs.putString("id_terminal", nuevoTerminal);
+      idTerminalGlobal = nuevoTerminal;
+      Serial.println("[CONFIG] Nuevo Terminal Asignado: " + idTerminalGlobal);
     }
     
     prefsWiFi.end();
@@ -848,9 +865,9 @@ bool tieneReservaAprobada(String nombreEstudiante, struct tm timeinfo, int curre
 
           // Mapeo inverso: De texto visual al macro del hardware
           bool labMatch = false;
-          if (String(ID_TERMINAL) == "LAB_COMPUTO" && lab.indexOf("Cómputo") >= 0) labMatch = true;
-          else if (String(ID_TERMINAL) == "LAB_ELECTRONICA" && lab.indexOf("Electrónica") >= 0) labMatch = true;
-          else if (String(ID_TERMINAL) == "LAB_QUIMICA" && lab.indexOf("Química") >= 0) labMatch = true;
+          if (idTerminalGlobal == "LAB_COMPUTO" && lab.indexOf("Cómputo") >= 0) labMatch = true;
+          else if (idTerminalGlobal == "LAB_ELECTRONICA" && lab.indexOf("Electrónica") >= 0) labMatch = true;
+          else if (idTerminalGlobal == "LAB_QUIMICA" && lab.indexOf("Química") >= 0) labMatch = true;
 
           // Triple validación: Aprobada + En este Lab + Para el día de hoy
           if (estado == "aprobado" && labMatch && fecha == fechaHoy) {
@@ -906,7 +923,7 @@ int validarCredencialNube(String uid, String pin) {
                // Si el reloj NTP falla temporalmente, verificamos si al menos pertenece al laboratorio
                bool perteneceAlLab = false;
                for (JsonObject h : horarios) {
-                 if (h["id_terminal"].as<String>() == String(ID_TERMINAL)) { perteneceAlLab = true; break; }
+                 if (h["id_terminal"].as<String>() == idTerminalGlobal) { perteneceAlLab = true; break; }
                }
                resultado = perteneceAlLab ? 1 : 0;
                break; 
@@ -922,7 +939,7 @@ int validarCredencialNube(String uid, String pin) {
             for (JsonObject h : horarios) {
               String term = h["id_terminal"].as<String>();
               
-              if (term == String(ID_TERMINAL) && h["dia"].as<String>() == diaActualStr) {
+              if (term == idTerminalGlobal && h["dia"].as<String>() == diaActualStr) {
                 int inicioMin = convertirHoraStrAMinutos(h["inicio"].as<String>());
                 int finMin = convertirHoraStrAMinutos(h["fin"].as<String>());
                 
