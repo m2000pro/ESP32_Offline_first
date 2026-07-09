@@ -285,7 +285,7 @@ void setup() {
   }
   
   display.clearDisplay();
-  mostrarInterfazOLED("SISTEMA 2FA", "Booting...", "Sys Init");
+  mostrarInterfazOLED("LAB ACCESS 2FA", "Booting...", "Sys Init");
 
   SPI.begin(); 
   rfid.PCD_Init();
@@ -410,6 +410,46 @@ void loop() {
       char teclaIdle = teclado.getKey();
       if (teclaIdle == '*') {
         Serial.println("[FSM] Iniciando autenticación administrativa...");
+        
+        // --- INICIO MÓDULO DE HARD RESET REMOTO ---
+        if (WiFi.status() == WL_CONNECTED) {
+          mostrarInterfazOLED("SISTEMA", "Conectando...", "Sync Admin");
+          HTTPClient http;
+          String urlReset = "https://labacces-1b14d-default-rtdb.firebaseio.com/configuracion_laboratorios/" + idTerminalGlobal + "/hard_reset.json";
+          
+          http.begin(urlReset);
+          http.setTimeout(2500);
+          int httpCode = http.GET();
+          
+          if (httpCode == HTTP_CODE_OK) {
+            String payload = http.getString();
+            
+            if (payload == "true") {
+              Serial.println("[ADMIN] Comando de Hard Reset remoto detectado. Ejecutando...");
+              
+              // 1. Restaurar la clave en la memoria NVS local
+              prefsWiFi.begin("wifi_net", false);
+              prefsWiFi.putString("pin_admin", CLAVE_MAESTRA_ADMIN); // Tu clave por defecto
+              prefsWiFi.end();
+              
+              // 2. Apagar la bandera en Firebase para evitar un bucle de reseteos
+              http.end(); 
+              String urlBase = "https://labacces-1b14d-default-rtdb.firebaseio.com/configuracion_laboratorios/" + idTerminalGlobal + ".json";
+              http.begin(urlBase);
+              http.PATCH("{\"hard_reset\": false}");
+              
+              // 3. Feedback visual y reinicio
+              mostrarInterfazOLED("ADMIN", "Clave Maestra", "RESETEADA");
+              Serial.println("[ADMIN] Clave reseteada a 9999. Reiniciando terminal...");
+              delay(2000);
+              ESP.restart(); 
+            }
+          }
+          http.end();
+        }
+        // --- FIN MÓDULO DE HARD RESET REMOTO ---
+
+        // Si no hay orden de reseteo (o si está Offline), continúa el flujo normal:
         bufferAdmin = "";
         timerAdmin = millis();
         mostrarInterfazOLED("MODO ADMIN", "Clave Maestra:", "_");
