@@ -87,6 +87,7 @@ unsigned long timerReconexion = 0;
 const unsigned long INTERVALO_RECONEXION = 30000;
 unsigned long timerPuertaAbierta = 0;
 unsigned long timerAdmin = 0;
+unsigned long timerHeartbeat = 0;
 bool puertaEstabaAbierta = false;
 bool modoClase = false;
 bool alarmaPuertaEnviada = false;
@@ -352,6 +353,26 @@ void loop() {
         redDisponible = true;
         estadoActual = SINCRONIZANDO_LOGS; 
       }
+    }
+  }
+
+  // --- PATRÓN HEARTBEAT (Latido de vida cada 60 seg) ---
+  if (redDisponible) {
+    if (millis() - timerHeartbeat > 60000) {
+      timerHeartbeat = millis();
+      
+      // Obtenemos la hora Unix (segundos desde 1970) que ya configuraste con NTP
+      time_t now;
+      time(&now); 
+      
+      HTTPClient http;
+      String url = "https://labacces-1b14d-default-rtdb.firebaseio.com/configuracion_laboratorios/" + idTerminalGlobal + ".json";
+      http.begin(url);
+      
+      // Enviamos un payload minúsculo
+      String payload = "{\"ultimo_ping\": " + String(now) + "}";
+      http.PATCH(payload);
+      http.end();
     }
   }
 
