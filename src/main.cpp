@@ -264,6 +264,18 @@ String obtenerClaveMaestra() {
   return clave;
 }
 
+// FUNCIÓN PARA BUZZER PASIVO (Bypass del bug LEDC)
+void generarTono(int duracionMs) {
+  unsigned long inicio = millis();
+  // Genera una onda cuadrada de 2kHz (250us ALTO, 250us BAJO)
+  while (millis() - inicio < duracionMs) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delayMicroseconds(250); 
+    digitalWrite(BUZZER_PIN, LOW);
+    delayMicroseconds(250); 
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   
@@ -285,7 +297,7 @@ void setup() {
   }
   
   display.clearDisplay();
-  mostrarInterfazOLED("LAB ACCESS 2FA", "Booting...", "Sys Init");
+  mostrarInterfazOLED("SISTEMA", "Iniciando", "LAB ACCESS");
 
   SPI.begin(); 
   rfid.PCD_Init();
@@ -310,7 +322,7 @@ void setup() {
   configTime(-5 * 3600, 0, "pool.ntp.org", "time.nist.gov");
   sincronizarCredencialesDesdeFirebase();
   
-  mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
+  mostrarInterfazOLED("SISTEMA LISTO", "Pase su", "TARJETA");
 }
 
 void loop() {
@@ -413,7 +425,7 @@ void loop() {
         
         // --- INICIO MÓDULO DE HARD RESET REMOTO ---
         if (WiFi.status() == WL_CONNECTED) {
-          mostrarInterfazOLED("SISTEMA", "Conectando...", "Sync Admin");
+          mostrarInterfazOLED("ADMIN", "Buscando", "RESET...");
           HTTPClient http;
           String urlReset = "https://labacces-1b14d-default-rtdb.firebaseio.com/configuracion_laboratorios/" + idTerminalGlobal + "/hard_reset.json";
           
@@ -439,7 +451,7 @@ void loop() {
               http.PATCH("{\"hard_reset\": false}");
               
               // 3. Feedback visual y reinicio
-              mostrarInterfazOLED("ADMIN", "Clave Maestra", "RESETEADA");
+              mostrarInterfazOLED("ADMIN", "Clave", "RESETEADA");
               Serial.println("[ADMIN] Clave reseteada a 9999. Reiniciando terminal...");
               delay(2000);
               ESP.restart(); 
@@ -452,7 +464,7 @@ void loop() {
         // Si no hay orden de reseteo (o si está Offline), continúa el flujo normal:
         bufferAdmin = "";
         timerAdmin = millis();
-        mostrarInterfazOLED("MODO ADMIN", "Clave Maestra:", "_");
+        mostrarInterfazOLED("ADMIN", "Clave:", "_");
         estadoActual = ESPERANDO_CLAVE_MAESTRA;
         break; 
       }
@@ -465,6 +477,8 @@ void loop() {
         }
         uidLeido.toUpperCase();
         rfid.PICC_HaltA(); 
+        
+        generarTono(100);
         
         Serial.println("\n[INFO] UID Capturado: " + uidLeido);
         
@@ -483,7 +497,7 @@ void loop() {
       
       if (millis() - timerAdmin > 10000) {
         Serial.println("[ADMIN] Timeout de ingreso. Abortando.");
-        mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
+        mostrarInterfazOLED("LISTO", "Pase su", "TARJETA");
         estadoActual = ESPERANDO_TARJETA;
         break;
       }
@@ -566,7 +580,7 @@ void loop() {
       }
 
       if (pinIngresado.length() == 4) {
-        mostrarInterfazOLED("PROCESANDO", "Verificando...", "Identidad");
+        mostrarInterfazOLED("ESPERE", "Validando", "DATOS...");
         delay(150); 
         t_inicio_auth = millis();
         //Verificación directa del estado físico del driver Wi-Fi antes de conmutar
@@ -619,8 +633,12 @@ void loop() {
       Serial.printf("[MÉTRICA] Latencia de Autenticación: %lu ms | Modo: %s\n", latencia, modoAuth.c_str());
       
       Serial.println("[INFO] 2FA OK. Modificando estado del actuador.");
-      mostrarInterfazOLED("BIENVENIDO", "Acceso Concedido", "Cerradura Abierta");
+      mostrarInterfazOLED("ACCESO OK", "Bienvenido", "ABIERTO");
       
+      generarTono(100);
+      delay(100);
+      generarTono(100);
+
       digitalWrite(LED_VERDE_PIN, LOW); // LOW = 0V = Relé Encendido (Abre puerta)
       REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN));
       REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN));
@@ -636,27 +654,31 @@ void loop() {
         
         estadoActual = ESPERANDO_TARJETA;
         Serial.println("[FSM] Cerradura asegurada.");
-        mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
+        mostrarInterfazOLED("LISTO", "Pase su", "TARJETA");
       }
       break;
 
     case ACCESO_DENEGADO:
       Serial.println("[INFO] Autorización denegada.");
-      mostrarInterfazOLED("ERROR", "Acceso Denegado", "Clave/UID Invalido");
+      mostrarInterfazOLED("DENEGADO", "UID/CLAVE", "INVALIDA");
       
       REG_WRITE(GPIO_OUT_W1TS_REG, (1 << LED_ROJO_PIN));
       digitalWrite(LED_VERDE_PIN, HIGH);
       
-      delay(3000); 
+      generarTono(400);
+      delay(150);
+      generarTono(400);
+      
+      delay(2000);
       
       REG_WRITE(GPIO_OUT_W1TC_REG, (1 << LED_ROJO_PIN)); 
-      mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
+      mostrarInterfazOLED("LISTO", "Pase su", "TARJETA");
       estadoActual = ESPERANDO_TARJETA;
       break;
       
     case SINCRONIZANDO_LOGS:
       sincronizarLogsOffline();
-      mostrarInterfazOLED("SISTEMA LISTO", "Presente su", "Tarjeta RFID");
+      mostrarInterfazOLED("LISTO", "Pase su", "TARJETA");
       estadoActual = ESPERANDO_TARJETA;
       break;
   }
